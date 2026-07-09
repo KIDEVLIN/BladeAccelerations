@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Data outputs (can be large / regenerated - track separately if needed)
+*.csv
+accel_*.csv
+
+# Compiled firmware/binaries (usually should stay, but exclude scratch builds)
+*.log
+
+# OS/editor cruft
+.vscode/
+.DS_Store
+Thumbs.db
