@@ -8,7 +8,8 @@ venv/
 env/
 .venv/
 
-# Data outputs (can be large / regenerated - track separately if needed)
+# Data outputs (large / regenerated per run - not tracked in git)
+Data/
 *.csv
 accel_*.csv
 
