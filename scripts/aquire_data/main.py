@@ -57,6 +57,7 @@ PCB_PORT = "COM6"
 
 LOADCELL_DEVICE = "Dev11"          # NI DAQ device name (same box motor.py's trigger line lives on)
 LOADCELL_SAMPLE_RATE_HZ = 1000.0   # hardware-timed analog sample rate
+RUN_LOAD_CELL = False               # False = accelerometer-only run, load cell skipped entirely
 
 ANGLES_FILE = "scripts/aquire_data/test_angles.xlsx"     # .xlsx, .csv, or .txt (one angle per line / row)
 OUTPUT_DIR = "Data/run_001"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
@@ -70,7 +71,7 @@ SETTLE_TIME_S = 1.0             # pause after move, before capture starts
 # starting a run.
 #   SWEEP_ANGLE_DEG:    blade azimuthal/sweep orientation for this run
 #   MOUNTING_ANGLE_DEG: fixed blade mounting angle for this run
-SWEEP_ANGLE_DEG = 0.0
+SWEEP_ANGLE_DEG = 30.0
 MOUNTING_ANGLE_DEG = 0.0
 
 # --------------------------------------------------
@@ -186,20 +187,29 @@ def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None):
 # --------------------------------------------------
 
 
-def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path):
-    """Runs collect_accel_for_duration and collect_load_for_duration in
-    parallel threads, released together via a shared threading.Barrier(2).
+def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path=None):
+    """Runs collect_accel_for_duration and (if load_csv_path is given)
+    collect_load_for_duration in parallel threads, released together via
+    a shared threading.Barrier sized to the number of threads actually
+    running.
+
+    load_csv_path=None (or RUN_LOAD_CELL=False upstream) skips the load
+    cell entirely -- only the accelerometer thread runs, against a
+    Barrier(1) so it releases itself immediately instead of waiting on a
+    party that will never show up.
 
     Returns a dict with per-sensor sample counts and t_start values:
         {
           "accel_samples": int, "accel_t_start": float,
+          # present only when load_csv_path was given:
           "load_samples": int,  "load_t_start": float,
         }
-    Any exception raised inside either worker thread is re-raised here
-    (after both threads have finished) so a sensor failure doesn't get
-    silently swallowed mid-sweep.
+    Any exception raised inside a worker thread is re-raised here (after
+    all threads have finished) so a sensor failure doesn't get silently
+    swallowed mid-sweep.
     """
-    start_gate = threading.Barrier(2)
+    run_load = load_csv_path is not None
+    start_gate = threading.Barrier(2 if run_load else 1)
     result = {}
     errors = []
 
@@ -211,34 +221,39 @@ def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path):
             result["accel_samples"], result["accel_t_start"] = n, t0
         except Exception as e:
             errors.append(("accel", e))
-            # Make sure the load-cell thread isn't left waiting forever
-            # on a barrier that will now never trip normally.
+            # Make sure a still-waiting load-cell thread (if any) isn't
+            # left hanging forever on a barrier that will now never trip
+            # normally.
             start_gate.abort()
 
-    def _run_load():
-        try:
-            n, t0 = lc.collect_load_for_duration(
-                LOADCELL_DEVICE, LOADCELL_SAMPLE_RATE_HZ, duration_s,
-                load_csv_path, start_event=start_gate,
-            )
-            result["load_samples"], result["load_t_start"] = n, t0
-        except Exception as e:
-            errors.append(("load", e))
-            start_gate.abort()
+    threads = [threading.Thread(target=_run_accel)]
 
-    t_accel = threading.Thread(target=_run_accel)
-    t_load = threading.Thread(target=_run_load)
-    t_accel.start()
-    t_load.start()
-    t_accel.join()
-    t_load.join()
+    if run_load:
+        def _run_load():
+            try:
+                n, t0 = lc.collect_load_for_duration(
+                    LOADCELL_DEVICE, LOADCELL_SAMPLE_RATE_HZ, duration_s,
+                    load_csv_path, start_event=start_gate,
+                )
+                result["load_samples"], result["load_t_start"] = n, t0
+            except Exception as e:
+                errors.append(("load", e))
+                start_gate.abort()
+
+        threads.append(threading.Thread(target=_run_load))
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
     if errors:
         names = ", ".join(f"{name}: {err}" for name, err in errors)
         raise RuntimeError(f"Synchronized capture failed ({names})")
 
-    offset_ms = (result["load_t_start"] - result["accel_t_start"]) * 1000.0
-    print(f"  Sync offset (load - accel t_start): {offset_ms:+.3f} ms")
+    if run_load:
+        offset_ms = (result["load_t_start"] - result["accel_t_start"]) * 1000.0
+        print(f"  Sync offset (load - accel t_start): {offset_ms:+.3f} ms")
 
     return result
 
@@ -258,6 +273,7 @@ def main():
     # wherever the script happened to be launched from.
     encoder_log_path = os.path.join(OUTPUT_DIR, "encoder_log.txt")
     motor = Motor(port=MOTOR_PORT, baud=MOTOR_BAUD, log_file=encoder_log_path)
+    plotter = LivePlotter()
     instr = pcb.connect(PCB_PORT)
     pcb.set_low_latency(instr.serial)
 
@@ -304,14 +320,20 @@ def main():
                 )
 
                 accel_csv_path = os.path.join(OUTPUT_DIR, f"angle_{angle:+07.2f}deg_accel.csv")
-                load_csv_path = os.path.join(OUTPUT_DIR, f"angle_{angle:+07.2f}deg_load.csv")
+                load_csv_path = (
+                    os.path.join(OUTPUT_DIR, f"angle_{angle:+07.2f}deg_load.csv")
+                    if RUN_LOAD_CELL else None
+                )
 
                 sync_result = collect_synchronized(
                     instr, SAMPLE_DURATION_S, accel_csv_path, load_csv_path
                 )
+
+                load_t_start = sync_result.get("load_t_start")
                 sync_offset_ms = (
-                    sync_result["load_t_start"] - sync_result["accel_t_start"]
-                ) * 1000.0
+                    (load_t_start - sync_result["accel_t_start"]) * 1000.0
+                    if load_t_start is not None else None
+                )
 
                 angle_log_writer.writerow({
                     "index": i,
@@ -324,12 +346,19 @@ def main():
                     "angle_of_attack_deg": frame_angles["angle_of_attack_deg"],
                     "angle_of_attack_deg_shifted": frame_angles["angle_of_attack_deg_shifted"],
                     "accel_csv_path": accel_csv_path,
-                    "load_csv_path": load_csv_path,
+                    "load_csv_path": load_csv_path if load_csv_path else "",
                     "accel_t_start": sync_result["accel_t_start"],
-                    "load_t_start": sync_result["load_t_start"],
-                    "sync_offset_ms": sync_offset_ms,
+                    "load_t_start": load_t_start if load_t_start is not None else "",
+                    "sync_offset_ms": sync_offset_ms if sync_offset_ms is not None else "",
                 })
                 angle_log_f.flush()
+                plotter.add_point(
+                            motor_angle_deg=angle,
+                            inclination_deg=frame_angles["inclination_angle_deg_shifted"],
+                            aoa_deg=frame_angles["angle_of_attack_deg_shifted"],
+                            accel_variance=1,
+                            loadcell_variance=None,   # wire in once load cell is added
+                        )
 
         print("\nAll angles complete.")
         print(f"Coordinate-frame angle log written to {angle_log_path}")

@@ -25,25 +25,6 @@ angle that sweeps the full +-180 deg range as the motor rotates
 (inclination_angle is the one naturally bounded near +-45 deg). If you
 meant a different field, just pass a different value into aoa_deg.
 
-Usage from main.py:
-
-    from live_plot import LivePlotter, accel_magnitude_variance
-
-    plotter = LivePlotter()
-    ...
-    for i, angle in enumerate(angles):
-        ...
-        plotter.add_point(
-            motor_angle_deg=angle,
-            inclination_deg=frame_angles["inclination_angle_deg_shifted"],
-            aoa_deg=frame_angles["angle_of_attack_deg_shifted"],
-            accel_variance=accel_var,
-            loadcell_variance=None,   # wire in once load cell is added
-        )
-    ...
-    plotter.save(OUTPUT_DIR)   # optional, writes PNGs at the end of the run
-    plotter.close()
-
 Requires matplotlib (pip install matplotlib) and a display -- if you
 ever run this headless (e.g. over SSH with no X server), construct
 LivePlotter(enabled=False) to no-op every call instead of crashing.
