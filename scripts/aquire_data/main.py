@@ -29,7 +29,7 @@ frame, using SWEEP_ANGLE_DEG / MOUNTING_ANGLE_DEG set below and the
 transforms in utils/coordinate_transforms.py.
 
 Requirements:
-    pip install minimalmodbus pyserial pandas openpyxl nidaqmx numpy
+    pip install minimalmodbus pyserial pandas openpyxl nidaqmx numpy matplotlib
 """
 
 import csv
@@ -60,10 +60,10 @@ LOADCELL_SAMPLE_RATE_HZ = 1000.0   # hardware-timed analog sample rate
 RUN_LOAD_CELL = False               # False = accelerometer-only run, load cell skipped entirely
 
 ANGLES_FILE = "scripts/aquire_data/test_angles.xlsx"     # .xlsx, .csv, or .txt (one angle per line / row)
-OUTPUT_DIR = "Data/run_001"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
+OUTPUT_DIR = "Data/run_002"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
 
-SAMPLE_DURATION_S = 5.0         # how long to capture accel + load data at each angle
-SETTLE_TIME_S = 1.0             # pause after move, before capture starts
+SAMPLE_DURATION_S = 4         # how long to capture accel + load data at each angle
+SETTLE_TIME_S = 2             # pause after move, before capture starts
 
 # Coordinate-frame constants (see utils/coordinate_transforms.py).
 # These describe the fixed physical setup for this run (as opposed to
@@ -118,9 +118,12 @@ def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None):
     thread alongside a load-cell thread (sharing the same barrier/event)
     releases both at the same instant for a synchronized start.
 
-    Returns (total_samples, t_start) where t_start is the
+    Returns (total_samples, t_start, accel_variance) where t_start is the
     time.perf_counter() value at which the capture loop actually began
-    (also written into the CSV header for reference).
+    (also written into the CSV header for reference), and accel_variance
+    is the variance of the acceleration magnitude over the capture
+    window (see live_varience_plot.accel_magnitude_variance), or 0.0 if
+    no samples were captured.
     """
     ser = instr.serial
     addr = instr.address
@@ -141,6 +144,7 @@ def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None):
         start_event.wait()
 
     total_samples = 0
+    all_rows = []  # accumulated for the post-capture variance calc below
     t_start = time.perf_counter()
 
     with open(csv_path, "w", newline="") as f:
@@ -169,9 +173,9 @@ def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None):
             signed = [v - 65536 if v >= 32768 else v for v in regs]
             for s in range(sets_to_read):
                 base = s * pcb.REGS_PER_SET
-                writer.writerow(
-                    [total_samples, f"{t_batch:.4f}"] + signed[base:base + pcb.REGS_PER_SET]
-                )
+                row = signed[base:base + pcb.REGS_PER_SET]
+                writer.writerow([total_samples, f"{t_batch:.4f}"] + row)
+                all_rows.append(row)
                 total_samples += 1
 
     pcb.write_register_retry(instr, pcb.REG_CMD, pcb.CMD_STOP, functioncode=6)
@@ -179,7 +183,9 @@ def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None):
     elapsed = time.perf_counter() - t_start
     rate = total_samples / elapsed if elapsed > 0 else 0
     print(f"  Accel: captured {total_samples} samples in {elapsed:.2f}s ({rate:.0f}/s, ODR={odr} Hz)")
-    return total_samples, t_start
+
+    accel_var = accel_magnitude_variance(all_rows, pcb.MG_PER_LSB) if all_rows else 0.0
+    return total_samples, t_start, accel_var
 
 
 # --------------------------------------------------
@@ -198,9 +204,11 @@ def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path=None):
     Barrier(1) so it releases itself immediately instead of waiting on a
     party that will never show up.
 
-    Returns a dict with per-sensor sample counts and t_start values:
+    Returns a dict with per-sensor sample counts, t_start values, and
+    the accelerometer variance:
         {
           "accel_samples": int, "accel_t_start": float,
+          "accel_variance": float,
           # present only when load_csv_path was given:
           "load_samples": int,  "load_t_start": float,
         }
@@ -215,10 +223,11 @@ def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path=None):
 
     def _run_accel():
         try:
-            n, t0 = collect_accel_for_duration(
+            n, t0, accel_var = collect_accel_for_duration(
                 instr, duration_s, accel_csv_path, start_event=start_gate
             )
             result["accel_samples"], result["accel_t_start"] = n, t0
+            result["accel_variance"] = accel_var
         except Exception as e:
             errors.append(("accel", e))
             # Make sure a still-waiting load-cell thread (if any) isn't
@@ -269,11 +278,10 @@ def main():
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Keep the encoder log inside the run's output folder instead of
-    # wherever the script happened to be launched from.
     encoder_log_path = os.path.join(OUTPUT_DIR, "encoder_log.txt")
     motor = Motor(port=MOTOR_PORT, baud=MOTOR_BAUD, log_file=encoder_log_path)
-    plotter = LivePlotter()
+    # plotter = LivePlotter(show_sweep=False, figsize=(8, 8), dpi=100)
+    plotter = LivePlotter(show_loadcell=False)
     instr = pcb.connect(PCB_PORT)
     pcb.set_low_latency(instr.serial)
 
@@ -290,6 +298,7 @@ def main():
         "angle_of_attack_deg", "angle_of_attack_deg_shifted",
         "accel_csv_path", "load_csv_path",
         "accel_t_start", "load_t_start", "sync_offset_ms",
+        "accel_variance",
     ]
 
     motor.start()
@@ -350,20 +359,24 @@ def main():
                     "accel_t_start": sync_result["accel_t_start"],
                     "load_t_start": load_t_start if load_t_start is not None else "",
                     "sync_offset_ms": sync_offset_ms if sync_offset_ms is not None else "",
+                    "accel_variance": sync_result["accel_variance"],
                 })
                 angle_log_f.flush()
+
                 plotter.add_point(
-                            motor_angle_deg=angle,
-                            inclination_deg=frame_angles["inclination_angle_deg_shifted"],
-                            aoa_deg=frame_angles["angle_of_attack_deg_shifted"],
-                            accel_variance=1,
-                            loadcell_variance=None,   # wire in once load cell is added
-                        )
+                    motor_angle_deg=angle,
+                    inclination_deg=frame_angles["inclination_angle_deg_shifted"],
+                    aoa_deg=frame_angles["angle_of_attack_deg_shifted"],
+                    accel_variance=sync_result["accel_variance"],
+                    loadcell_variance=None,   # wire in once load cell reports variance too
+                )
 
         print("\nAll angles complete.")
         print(f"Coordinate-frame angle log written to {angle_log_path}")
+        plotter.save(OUTPUT_DIR)
     finally:
         motor.stop()
+        plotter.close()
 
 
 if __name__ == "__main__":
