@@ -341,7 +341,22 @@ def main():
             time.sleep(POST_SETTLE_S)
 
             csv_path = os.path.join(OUTPUT_DIR, f"angle_{angle:+07.2f}deg.csv")
-            collect_accel_for_duration(instr, SAMPLE_DURATION_S, csv_path, on_poll=plotter.pump)
+            n_samples, t_start, accel_var = collect_accel_for_duration(   # CHANGED — capture the return
+                instr, SAMPLE_DURATION_S, csv_path, on_poll=plotter.pump
+            )
+
+            frame_angles = ct.compute_frame_angles(                       # NEW
+                motor_angle_deg=actual if actual is not None else angle,
+                sweep_angle_deg=SWEEP_ANGLE_DEG,
+                mounting_angle_deg=MOUNTING_ANGLE_DEG,
+            )
+
+            plotter.add_point(                                            # NEW — this was the missing call
+                motor_angle_deg=actual if actual is not None else angle,
+                inclination_deg=frame_angles["inclination_angle_deg_shifted"],
+                aoa_deg=frame_angles["angle_of_attack_deg_shifted"],
+                accel_variance=accel_var,
+            )
 
         print("\nAll angles complete.")
     finally:
@@ -350,6 +365,8 @@ def main():
         except Exception as e:
             print(f"  WARN: failed to home motor: {e}")
         motor.stop()
+        plotter.save(OUTPUT_DIR)                                          # NEW — writes live_diagnostics.png
+        plotter.close()                                                   # NEW
 
 
 if __name__ == "__main__":
