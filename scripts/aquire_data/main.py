@@ -72,7 +72,7 @@ RUN_TUNNEL_CONDITIONS = True       # False = skip wind tunnel conditions entirel
 AIRFOIL_CHORD_M = 0.19             # Reynolds number length scale -- set per experiment
 
 ANGLES_FILE = "scripts/aquire_data/test_angles.xlsx"     # .xlsx, .csv, or .txt (one angle per line / row)
-OUTPUT_DIR = "Data/run_008"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
+OUTPUT_DIR = "Data/run_009"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
 
 SAMPLE_DURATION_S = 4         # how long to capture accel + load data at each angle
 SETTLE_TIME_S = 2             # pause after move, before capture starts
@@ -174,7 +174,7 @@ def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None, on
              "s3_x", "s3_y", "s3_z",
              "s4_x", "s4_y", "s4_z"]
         )
-
+        last_pump = time.perf_counter()
         while (time.perf_counter() - t_start) < duration_s:
             avail = pcb.read_register_raw(ser, addr, pcb.REG_AVAIL)
             if avail == 0:
