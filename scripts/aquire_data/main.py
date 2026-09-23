@@ -211,7 +211,7 @@ def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None, on
 # --------------------------------------------------
 
 
-def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path=None):
+def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path=None, on_poll=None):
     """Runs collect_accel_for_duration and (if load_csv_path is given)
     collect_load_for_duration in parallel threads, released together via
     a shared threading.Barrier sized to the number of threads actually
@@ -243,14 +243,13 @@ def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path=None):
         try:
             n, t0, accel_var = collect_accel_for_duration(
                 instr, duration_s, accel_csv_path, start_event=start_gate
+                # NOTE: no on_poll here -- this runs on a worker thread,
+                # and matplotlib calls are not thread-safe.
             )
             result["accel_samples"], result["accel_t_start"] = n, t0
             result["accel_variance"] = accel_var
         except Exception as e:
             errors.append(("accel", e))
-            # Make sure a still-waiting load-cell thread (if any) isn't
-            # left hanging forever on a barrier that will now never trip
-            # normally.
             start_gate.abort()
 
     threads = [threading.Thread(target=_run_accel)]
@@ -258,11 +257,12 @@ def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path=None):
     if run_load:
         def _run_load():
             try:
-                n, t0 = lc.collect_load_for_duration(
+                n, t0, load_var = lc.collect_load_for_duration(          # CHANGED — unpack 3-tuple now
                     LOADCELL_DEVICE, LOADCELL_SAMPLE_RATE_HZ, duration_s,
                     load_csv_path, start_event=start_gate,
                 )
                 result["load_samples"], result["load_t_start"] = n, t0
+                result["load_variance"] = load_var                        # NEW
             except Exception as e:
                 errors.append(("load", e))
                 start_gate.abort()
@@ -271,6 +271,14 @@ def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path=None):
 
     for t in threads:
         t.start()
+
+    # Poll from the MAIN thread instead of a plain t.join(). on_poll
+    # (plotter.pump) touches matplotlib, which isn't thread-safe -- so
+    # all GUI servicing stays here rather than inside the worker threads.
+    while any(t.is_alive() for t in threads):                             # NEW
+        if on_poll is not None:
+            on_poll()
+        time.sleep(0.05)
     for t in threads:
         t.join()
 
@@ -341,21 +349,30 @@ def main():
             time.sleep(POST_SETTLE_S)
 
             csv_path = os.path.join(OUTPUT_DIR, f"angle_{angle:+07.2f}deg.csv")
-            n_samples, t_start, accel_var = collect_accel_for_duration(   # CHANGED — capture the return
-                instr, SAMPLE_DURATION_S, csv_path, on_poll=plotter.pump
-            )
+            load_csv_path = (
+                os.path.join(OUTPUT_DIR, f"angle_{angle:+07.2f}deg_load.csv")
+                if RUN_LOAD_CELL else None
+            )                                                             # NEW
 
-            frame_angles = ct.compute_frame_angles(                       # NEW
+            sync_result = collect_synchronized(                          # CHANGED — was collect_accel_for_duration
+                instr, SAMPLE_DURATION_S, csv_path,
+                load_csv_path=load_csv_path, on_poll=plotter.pump,
+            )
+            accel_var = sync_result["accel_variance"]
+            load_var = sync_result.get("load_variance")                  # None when RUN_LOAD_CELL is False
+
+            frame_angles = ct.compute_frame_angles(
                 motor_angle_deg=actual if actual is not None else angle,
                 sweep_angle_deg=SWEEP_ANGLE_DEG,
                 mounting_angle_deg=MOUNTING_ANGLE_DEG,
             )
 
-            plotter.add_point(                                            # NEW — this was the missing call
+            plotter.add_point(
                 motor_angle_deg=actual if actual is not None else angle,
                 inclination_deg=frame_angles["inclination_angle_deg_shifted"],
                 aoa_deg=frame_angles["angle_of_attack_deg_shifted"],
                 accel_variance=accel_var,
+                loadcell_variance=load_var,                              # NEW — this is the wiring that was missing
             )
 
         print("\nAll angles complete.")

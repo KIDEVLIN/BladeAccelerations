@@ -47,6 +47,7 @@ import time
 import numpy as np
 import nidaqmx
 from nidaqmx.constants import TerminalConfiguration
+from utils.live_varience_plot import loadcell_magnitude_variance   # NEW import at top of file
 
 
 N_CHANNELS = 6  # AI0 through AI5, see column mapping below
@@ -190,7 +191,10 @@ def collect_load_for_duration(device_name, sample_rate, duration_s, csv_path,
     print(f"  Load cell: captured {n_samples} samples in {elapsed:.2f}s "
           f"({rate:.0f}/s)")
 
-    return n_samples, t_start
+    force_xyz = F[:3, :].T  # (n_samples, 3) -- Fx, Fy, Fz per sample     # NEW
+    load_var = loadcell_magnitude_variance(force_xyz) if n_samples > 0 else 0.0  # NEW
+
+    return n_samples, t_start, load_var      
 
 
 # --------------------------------------------------
