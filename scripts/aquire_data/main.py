@@ -28,6 +28,14 @@ to the resulting inclination angle and angle of attack in the blade
 frame, using SWEEP_ANGLE_DEG / MOUNTING_ANGLE_DEG set below and the
 transforms in utils/coordinate_transforms.py.
 
+Tunnel conditions (pitot-static, temperature, static pressure) are
+sampled continuously in the background for the whole sweep -- not
+per-angle -- via wind_tunnel_conditions.TunnelConditionsCollector,
+mirroring how Motor's encoder-polling thread runs for the life of the
+rig rather than being re-armed each angle. The run-averaged conditions
+(density, viscosity, freestream velocity, Reynolds number, etc.) are
+written once at the end to Data/wind_tunnel/tunnel_conditions_summary.csv.
+
 Requirements:
     pip install minimalmodbus pyserial pandas openpyxl nidaqmx numpy matplotlib
 """
@@ -44,6 +52,7 @@ from motor import Motor
 from utils import coordinate_transforms as ct
 import test_modbus as pcb
 import load_cell as lc
+import wind_tunnel_conditions as wtc
 from utils.live_varience_plot import LivePlotter, accel_magnitude_variance
 
 # --------------------------------------------------
@@ -58,6 +67,9 @@ PCB_PORT = "COM6"
 LOADCELL_DEVICE = "Dev11"          # NI DAQ device name (same box motor.py's trigger line lives on)
 LOADCELL_SAMPLE_RATE_HZ = 1000.0   # hardware-timed analog sample rate
 RUN_LOAD_CELL = False               # False = accelerometer-only run, load cell skipped entirely
+
+RUN_TUNNEL_CONDITIONS = True       # False = skip wind tunnel conditions entirely
+AIRFOIL_CHORD_M = 0.19             # Reynolds number length scale -- set per experiment
 
 ANGLES_FILE = "scripts/aquire_data/test_angles.xlsx"     # .xlsx, .csv, or .txt (one angle per line / row)
 OUTPUT_DIR = "Data/run_002"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
@@ -285,6 +297,8 @@ def main():
     instr = pcb.connect(PCB_PORT)
     pcb.set_low_latency(instr.serial)
 
+    tunnel_collector = wtc.TunnelConditionsCollector(length_scale_m=AIRFOIL_CHORD_M) if RUN_TUNNEL_CONDITIONS else None
+
     print(
         f"Coordinate-frame constants for this run: "
         f"sweep_angle={SWEEP_ANGLE_DEG:.2f} deg, mounting_angle={MOUNTING_ANGLE_DEG:.2f} deg"
@@ -302,6 +316,8 @@ def main():
     ]
 
     motor.start()
+    if tunnel_collector is not None:
+        tunnel_collector.start()
     try:
         with open(angle_log_path, "w", newline="") as angle_log_f:
             angle_log_writer = csv.DictWriter(angle_log_f, fieldnames=angle_log_fields)
@@ -377,6 +393,16 @@ def main():
     finally:
         motor.stop()
         plotter.close()
+        if tunnel_collector is not None:
+            tunnel_summary = tunnel_collector.stop()
+            wtc.save_summary(tunnel_summary, output_dir=os.path.join(OUTPUT_DIR, "wind_tunnel"))
+            print(
+                f"  Tunnel conditions (run average, {tunnel_summary['sample_count']} batches): "
+                f"T={tunnel_summary['temp_k']:.2f} K, "
+                f"rho={tunnel_summary['density_kg_m3']:.4f} kg/m3, "
+                f"V_inf={tunnel_summary['velocity_freestream_m_s']:.2f} m/s, "
+                f"Re={tunnel_summary['reynolds_number']:.3e}"
+            )
 
 
 if __name__ == "__main__":
