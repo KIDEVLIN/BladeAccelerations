@@ -59,10 +59,10 @@ from utils.live_varience_plot import LivePlotter, accel_magnitude_variance
 # FOR YOU TO UPDATE BEFORE RUNS
 # --------------------------------------------------
 
-MOTOR_PORT = "COM5"
+MOTOR_PORT = "COM11"
 MOTOR_BAUD = 115200
 
-PCB_PORT = "COM6"
+PCB_PORT = "COM12"
 
 LOADCELL_DEVICE = "Dev11"          # NI DAQ device name (same box motor.py's trigger line lives on)
 LOADCELL_SAMPLE_RATE_HZ = 1000.0   # hardware-timed analog sample rate
@@ -72,7 +72,7 @@ RUN_TUNNEL_CONDITIONS = True       # False = skip wind tunnel conditions entirel
 AIRFOIL_CHORD_M = 0.19             # Reynolds number length scale -- set per experiment
 
 ANGLES_FILE = "scripts/aquire_data/test_angles.xlsx"     # .xlsx, .csv, or .txt (one angle per line / row)
-OUTPUT_DIR = "Data/run_002"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
+OUTPUT_DIR = "Data/run_008"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
 
 SAMPLE_DURATION_S = 4         # how long to capture accel + load data at each angle
 SETTLE_TIME_S = 2             # pause after move, before capture starts
