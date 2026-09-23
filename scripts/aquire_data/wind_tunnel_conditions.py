@@ -53,13 +53,13 @@ from nidaqmx.constants import AcquisitionType, TerminalConfiguration
 # are time-interleaved by the driver rather than truly simultaneous --
 # not a correctness problem for slowly-varying tunnel conditions, but
 # worth knowing.
-DAQ_DEVICE = "Dev11"
-CHANNEL_FREESTREAM_DP = f"{DAQ_DEVICE}/ai6"    # TODO: confirm - avoid load cell's ai0-ai5
-CHANNEL_TRAVERSE_DP = f"{DAQ_DEVICE}/ai7"      # TODO: confirm
-CHANNEL_STATIC_PRESSURE = f"{DAQ_DEVICE}/ai8"  # TODO: confirm
-CHANNEL_TEMPERATURE = f"{DAQ_DEVICE}/ai9"      # TODO: confirm
+DAQ_DEVICE = "Dev8"
+CHANNEL_FREESTREAM_DP = f"{DAQ_DEVICE}/ai0"    # TODO: confirm - avoid load cell's ai0-ai5
+CHANNEL_TRAVERSE_DP = f"{DAQ_DEVICE}/ai1"      # TODO: confirm
+CHANNEL_STATIC_PRESSURE = f"{DAQ_DEVICE}/ai3"  # TODO: confirm
+CHANNEL_TEMPERATURE = f"{DAQ_DEVICE}/ai2"      # TODO: confirm
 
-AI_TERMINAL_CONFIG = TerminalConfiguration.RSE
+AI_TERMINAL_CONFIG = TerminalConfiguration.DIFF
 AI_MIN_V = -10.0
 AI_MAX_V = 10.0
 
@@ -96,6 +96,8 @@ TRAVERSE_DP_SENSE_V_PER_PSI = None
 # standalone use of this module.
 DEFAULT_LENGTH_SCALE_M = 0.19
 
+ONE_ATM_PA = 101325.01
+
 OUTPUT_DIR = "Data/wind_tunnel"
 SUMMARY_CSV_NAME = "tunnel_conditions_summary.csv"
 
@@ -123,12 +125,11 @@ class WindTunnelConditions:
 
 
 def _z_correction(temp_k: float, press_atm: float) -> float:
-    """Air compressibility factor Z -- 3-term virial expansion in
-    (Press_atm - 1), each coefficient a polynomial in TempK. Reproduced
-    verbatim from the decompiled LabVIEW Formula nodes (this is what
-    ZSI.m almost certainly implements internally)."""
-    z1 = 3.1753e-5 + (-1.7155e-7) * temp_k + (2.4630e-10) * temp_k ** 2
-    z2 = -9.5378e-3 + (5.1986e-5) * temp_k + (-7.0621e-8) * temp_k ** 2
+    """Air compressibility factor Z -- verified against ZSI.m (Zagarola
+    1996 thesis, p294). Z1 (linear term) and Z2 (quadratic term) were
+    previously swapped -- fixed here to match ZSI.m's ordering."""
+    z1 = -9.5378e-3 + (5.1986e-5) * temp_k + (-7.0621e-8) * temp_k ** 2
+    z2 = 3.1753e-5 + (-1.7155e-7) * temp_k + (2.4630e-10) * temp_k ** 2
     z3 = (6.3764e-7 + (-6.4678e-9) * temp_k + (2.1880e-11) * temp_k ** 2
           + (-2.4691e-14) * temp_k ** 3)
     return 1.0 + z1 * (press_atm - 1) + z2 * (press_atm - 1) ** 2 + z3 * (press_atm - 1) ** 3
@@ -150,15 +151,23 @@ def compute_conditions(freestream_dp_v, traverse_dp_v, static_pressure_v, temper
     temp_c = (temp_f - 32.0) * 5.0 / 9.0
     temp_k = temp_c + 273.15
 
-    # --- Static/fluid pressure: volts -> Pa (absolute) ---
-    static_pressure_pa = (static_pressure_v * STATIC_PRESSURE_SENSE_PSI_PER_V
-                           + STATIC_PRESSURE_OFFSET_PSI) * TO_PA
-    static_pressure_atm = static_pressure_pa / 101325.0
+    # --- Static/fluid pressure: volts -> Pa GAUGE (as calibrated), then
+    # absolute -- ZSI.m expects gauge pressure and adds oneatm itself;
+    # we do that conversion here instead so static_pressure_pa below is
+    # already absolute for everything downstream. ---
+    static_pressure_gauge_pa = (static_pressure_v * STATIC_PRESSURE_SENSE_PSI_PER_V
+                                 + STATIC_PRESSURE_OFFSET_PSI) * TO_PA
+    static_pressure_pa = static_pressure_gauge_pa + ONE_ATM_PA  # absolute
+    static_pressure_atm = static_pressure_pa / ONE_ATM_PA
+
 
     # --- Density (with compressibility correction) + viscosity ---
     z = _z_correction(temp_k, static_pressure_atm)
     density = static_pressure_pa / (temp_k * z * 287.1)
-    dynamic_viscosity = 1.458e-6 * (temp_k ** 1.5) / (110.4 + temp_k)
+
+    mu_0 = 1.458e-6 * (temp_k ** 1.5) / (110.4 + temp_k)      # Sutherland term
+    mu_1 = (1.021e-8) * density + (5.969e-11) * density ** 2  # ZSI.m's density-dependent correction
+    dynamic_viscosity = mu_0 + mu_1
     kinematic_viscosity = dynamic_viscosity / density
 
     # --- Freestream dynamic pressure -> velocity ---
