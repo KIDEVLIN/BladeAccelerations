@@ -122,7 +122,7 @@ def load_angles(path):
 # --------------------------------------------------
 
 
-def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None):
+def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None, on_poll=None):
     """Capture accelerometer FIFO data for duration_s seconds and write it
     to csv_path. Mirrors test_modbus.cmd_stream's raw-serial loop, but
     stops after a fixed duration instead of waiting for KeyboardInterrupt.
@@ -179,20 +179,22 @@ def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None):
             avail = pcb.read_register_raw(ser, addr, pcb.REG_AVAIL)
             if avail == 0:
                 time.sleep(0.001)
-                continue
+            else:
+                sets_to_read = min(avail, pcb.BULK_MAX_SETS)
+                num_regs = sets_to_read * pcb.REGS_PER_SET
+                regs = pcb.bulk_read_raw(ser, addr, pcb.REG_BULK, num_regs)
+                t_batch = time.perf_counter() - t_start
 
-            sets_to_read = min(avail, pcb.BULK_MAX_SETS)
-            num_regs = sets_to_read * pcb.REGS_PER_SET
-            regs = pcb.bulk_read_raw(ser, addr, pcb.REG_BULK, num_regs)
-            t_batch = time.perf_counter() - t_start
-
-            signed = [v - 65536 if v >= 32768 else v for v in regs]
-            for s in range(sets_to_read):
-                base = s * pcb.REGS_PER_SET
-                row = signed[base:base + pcb.REGS_PER_SET]
-                writer.writerow([total_samples, f"{t_batch:.4f}"] + row)
-                all_rows.append(row)
-                total_samples += 1
+                signed = [v - 65536 if v >= 32768 else v for v in regs]
+                for s in range(sets_to_read):
+                    base = s * pcb.REGS_PER_SET
+                    row = signed[base:base + pcb.REGS_PER_SET]
+                    writer.writerow([total_samples, f"{t_batch:.4f}"] + row)
+                    all_rows.append(row)
+                    total_samples += 1
+            if on_poll is not None and (time.perf_counter() - last_pump) > 0.1:  # NEW, throttled
+                on_poll()
+                last_pump = time.perf_counter()
 
     pcb.write_register_retry(instr, pcb.REG_CMD, pcb.CMD_STOP, functioncode=6)
 
@@ -330,6 +332,7 @@ def main():
                     angle, wait=True,
                     tolerance_deg=SETTLE_TOLERANCE_DEG,
                     timeout_s=SETTLE_TIMEOUT_S,
+                    on_poll=plotter.pump,
                 )
             except TimeoutError as e:
                 print(f"  WARN: {e} -- proceeding with last known position")
@@ -338,7 +341,7 @@ def main():
             time.sleep(POST_SETTLE_S)
 
             csv_path = os.path.join(OUTPUT_DIR, f"angle_{angle:+07.2f}deg.csv")
-            collect_accel_for_duration(instr, SAMPLE_DURATION_S, csv_path)
+            collect_accel_for_duration(instr, SAMPLE_DURATION_S, csv_path, on_poll=plotter.pump)
 
         print("\nAll angles complete.")
     finally:

@@ -268,7 +268,8 @@ class Motor:
         self._send("FL")
 
     def move_to_angle(self, target_deg, wait=True, tolerance_deg=0.1,
-                       stable_samples=3, timeout_s=10.0, poll_interval=0.01):
+                       stable_samples=3, timeout_s=10.0, poll_interval=0.01,
+                       on_poll=None):
         """Absolute move to target_deg, computed relative to the last
         known encoder reading. Raises ValueError if target_deg is outside
         +/- max_travel_deg.
@@ -303,12 +304,13 @@ class Motor:
             return self.wait_until_settled(
                 target_deg, tolerance_deg=tolerance_deg,
                 stable_samples=stable_samples, timeout_s=timeout_s,
-                poll_interval=poll_interval,
+                poll_interval=poll_interval, on_poll=on_poll,            # NEW
             )
         return None
 
     def wait_until_settled(self, target_deg, tolerance_deg=0.1,
-                            stable_samples=3, timeout_s=10.0, poll_interval=0.01):
+                            stable_samples=3, timeout_s=10.0, poll_interval=0.01,
+                            on_poll=None):
         """Block until the background-thread encoder cache reports a
         position within tolerance_deg of target_deg for `stable_samples`
         consecutive *fresh* readings (fresh = the poll timestamp advanced
@@ -331,6 +333,8 @@ class Motor:
                         return deg
                 else:
                     consecutive_ok = 0
+            if on_poll is not None:                                       # NEW
+                on_poll()
             time.sleep(poll_interval)
 
         counts, _ = self.get_latest_encoder()

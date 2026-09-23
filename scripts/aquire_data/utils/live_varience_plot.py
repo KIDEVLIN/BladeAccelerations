@@ -170,6 +170,17 @@ class LivePlotter:
         # window before the first add_point() call comes in.
         plt.pause(0.1)
 
+    def pump(self):
+        """Service the GUI event loop without adding a data point. Call
+        this periodically during any long blocking operation (motor
+        settling, sensor capture) so the window stays responsive instead
+        of freezing -- Tk/Qt on Windows especially need their event queue
+        serviced regularly or the OS marks the window unresponsive."""
+        if not self.enabled:
+            return
+        self.fig.canvas.flush_events()
+        plt.pause(0.001)
+
     def add_point(self, motor_angle_deg, inclination_deg, aoa_deg,
                    accel_variance, loadcell_variance=None):
         """Append one new (angle, variance) result and refresh the figure.
