@@ -86,6 +86,10 @@ SETTLE_TIME_S = 2             # pause after move, before capture starts
 SWEEP_ANGLE_DEG = 30.0
 MOUNTING_ANGLE_DEG = 0.0
 
+SETTLE_TOLERANCE_DEG = 0.1
+SETTLE_TIMEOUT_S = 10.0
+POST_SETTLE_S = 0.2
+
 # --------------------------------------------------
 # Angle list loading
 # --------------------------------------------------
@@ -315,94 +319,34 @@ def main():
         "accel_variance",
     ]
 
+
     motor.start()
-    if tunnel_collector is not None:
-        tunnel_collector.start()
     try:
-        with open(angle_log_path, "w", newline="") as angle_log_f:
-            angle_log_writer = csv.DictWriter(angle_log_f, fieldnames=angle_log_fields)
-            angle_log_writer.writeheader()
+        for i, angle in enumerate(angles):
+            print(f"\n=== Angle {i + 1}/{len(angles)}: {angle:+.2f} deg ===")
 
-            for i, angle in enumerate(angles):
-                print(f"\n=== Angle {i + 1}/{len(angles)}: {angle:+.2f} deg ===")
-
-                motor.move_to_angle(angle)
-                time.sleep(SETTLE_TIME_S)
-
+            try:
+                actual = motor.move_to_angle(
+                    angle, wait=True,
+                    tolerance_deg=SETTLE_TOLERANCE_DEG,
+                    timeout_s=SETTLE_TIMEOUT_S,
+                )
+            except TimeoutError as e:
+                print(f"  WARN: {e} -- proceeding with last known position")
                 actual = motor.position()
-                if actual is not None:
-                    print(f"  Motor settled at {actual:.2f} deg")
 
-                # Prefer the actual settled encoder position over the
-                # requested angle for the coordinate-frame calculation;
-                # fall back to the requested angle if no reading landed.
-                motor_angle_for_transform = actual if actual is not None else angle
+            time.sleep(POST_SETTLE_S)
 
-                frame_angles = ct.compute_frame_angles(
-                    motor_angle_deg=motor_angle_for_transform,
-                    sweep_angle_deg=SWEEP_ANGLE_DEG,
-                    mounting_angle_deg=MOUNTING_ANGLE_DEG,
-                )
-
-                accel_csv_path = os.path.join(OUTPUT_DIR, f"angle_{angle:+07.2f}deg_accel.csv")
-                load_csv_path = (
-                    os.path.join(OUTPUT_DIR, f"angle_{angle:+07.2f}deg_load.csv")
-                    if RUN_LOAD_CELL else None
-                )
-
-                sync_result = collect_synchronized(
-                    instr, SAMPLE_DURATION_S, accel_csv_path, load_csv_path
-                )
-
-                load_t_start = sync_result.get("load_t_start")
-                sync_offset_ms = (
-                    (load_t_start - sync_result["accel_t_start"]) * 1000.0
-                    if load_t_start is not None else None
-                )
-
-                angle_log_writer.writerow({
-                    "index": i,
-                    "motor_angle_requested_deg": angle,
-                    "motor_angle_actual_deg": actual,
-                    "sweep_angle_deg": SWEEP_ANGLE_DEG,
-                    "mounting_angle_deg": MOUNTING_ANGLE_DEG,
-                    "inclination_angle_deg": frame_angles["inclination_angle_deg"],
-                    "inclination_angle_deg_shifted": frame_angles["inclination_angle_deg_shifted"],
-                    "angle_of_attack_deg": frame_angles["angle_of_attack_deg"],
-                    "angle_of_attack_deg_shifted": frame_angles["angle_of_attack_deg_shifted"],
-                    "accel_csv_path": accel_csv_path,
-                    "load_csv_path": load_csv_path if load_csv_path else "",
-                    "accel_t_start": sync_result["accel_t_start"],
-                    "load_t_start": load_t_start if load_t_start is not None else "",
-                    "sync_offset_ms": sync_offset_ms if sync_offset_ms is not None else "",
-                    "accel_variance": sync_result["accel_variance"],
-                })
-                angle_log_f.flush()
-
-                plotter.add_point(
-                    motor_angle_deg=angle,
-                    inclination_deg=frame_angles["inclination_angle_deg_shifted"],
-                    aoa_deg=frame_angles["angle_of_attack_deg_shifted"],
-                    accel_variance=sync_result["accel_variance"],
-                    loadcell_variance=None,   # wire in once load cell reports variance too
-                )
+            csv_path = os.path.join(OUTPUT_DIR, f"angle_{angle:+07.2f}deg.csv")
+            collect_accel_for_duration(instr, SAMPLE_DURATION_S, csv_path)
 
         print("\nAll angles complete.")
-        print(f"Coordinate-frame angle log written to {angle_log_path}")
-        plotter.save(OUTPUT_DIR)
     finally:
+        try:
+            motor.home()
+        except Exception as e:
+            print(f"  WARN: failed to home motor: {e}")
         motor.stop()
-        plotter.close()
-        if tunnel_collector is not None:
-            tunnel_summary = tunnel_collector.stop()
-            wtc.save_summary(tunnel_summary, output_dir=os.path.join(OUTPUT_DIR, "wind_tunnel"))
-            print(
-                f"  Tunnel conditions (run average, {tunnel_summary['sample_count']} batches): "
-                f"T={tunnel_summary['temp_k']:.2f} K, "
-                f"rho={tunnel_summary['density_kg_m3']:.4f} kg/m3, "
-                f"V_inf={tunnel_summary['velocity_freestream_m_s']:.2f} m/s, "
-                f"Re={tunnel_summary['reynolds_number']:.3e}"
-            )
 
 
 if __name__ == "__main__":

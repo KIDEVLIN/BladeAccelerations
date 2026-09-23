@@ -40,12 +40,14 @@ class Motor:
         log_file="encoder_log.txt",
         poll_interval=0.005,
         daq_line="Dev11/port1/line0",
+        max_travel_deg=360.0,
     ):
         self.port = port
         self.baud = baud
         self.counts_per_deg = counts_per_deg
         self.poll_interval = poll_interval
         self.daq_line = daq_line
+        self.max_travel_deg = max_travel_deg
 
         self._ser = None
 
@@ -248,19 +250,43 @@ class Motor:
             print("Warning: no encoder reading available yet.")
 
     def move(self, angle_deg):
-        """Relative move by angle_deg."""
+        """Relative move by angle_deg. Raises ValueError if the resulting
+        absolute position would exceed +/- max_travel_deg."""
+        current_counts, _ = self.get_latest_encoder()
+        if current_counts is not None:
+            projected_deg = self.counts_to_degrees(current_counts) + angle_deg
+            if abs(projected_deg) > self.max_travel_deg:
+                raise ValueError(
+                    f"Move by {angle_deg:+.2f} deg would put the motor at "
+                    f"{projected_deg:+.2f} deg, outside the +/-{self.max_travel_deg} "
+                    f"deg travel limit"
+                )
+
         counts = self.degrees_to_counts(angle_deg)
         self._send("VE1")
         self._send(f"DI{counts}")
         self._send("FL")
 
-    def move_to_angle(self, target_deg):
+    def move_to_angle(self, target_deg, wait=True, tolerance_deg=0.1,
+                       stable_samples=3, timeout_s=10.0, poll_interval=0.01):
         """Absolute move to target_deg, computed relative to the last
-        known encoder reading."""
+        known encoder reading. Raises ValueError if target_deg is outside
+        +/- max_travel_deg.
+
+        If wait=True (default), blocks until the encoder position settles
+        within tolerance_deg of target_deg for `stable_samples` consecutive
+        fresh readings, or raises TimeoutError after timeout_s. Returns the
+        settled position in degrees (or None if wait=False)."""
+        if abs(target_deg) > self.max_travel_deg:
+            raise ValueError(
+                f"Target angle {target_deg:+.2f} deg is outside the "
+                f"+/-{self.max_travel_deg} deg travel limit"
+            )
+
         current_counts, _ = self.get_latest_encoder()
         if current_counts is None:
             print("No encoder reading yet -- can't compute a relative move.")
-            return
+            return None
 
         target_counts = self.degrees_to_counts(target_deg)
         delta_counts = target_counts - current_counts
@@ -272,6 +298,54 @@ class Motor:
         self._send("VE1")
         self._send(f"DI{delta_counts}")
         self._send("FL")
+
+        if wait:
+            return self.wait_until_settled(
+                target_deg, tolerance_deg=tolerance_deg,
+                stable_samples=stable_samples, timeout_s=timeout_s,
+                poll_interval=poll_interval,
+            )
+        return None
+
+    def wait_until_settled(self, target_deg, tolerance_deg=0.1,
+                            stable_samples=3, timeout_s=10.0, poll_interval=0.01):
+        """Block until the background-thread encoder cache reports a
+        position within tolerance_deg of target_deg for `stable_samples`
+        consecutive *fresh* readings (fresh = the poll timestamp advanced
+        since the last check, so we're not re-checking a stale value while
+        the motor is still moving between polls). Raises TimeoutError if
+        that doesn't happen within timeout_s. No extra serial traffic --
+        this just reads the cache the background thread already keeps."""
+        deadline = time.time() + timeout_s
+        consecutive_ok = 0
+        last_seen_t = None
+
+        while time.time() < deadline:
+            counts, t = self.get_latest_encoder()
+            if counts is not None and t != last_seen_t:
+                last_seen_t = t
+                deg = self.counts_to_degrees(counts)
+                if abs(deg - target_deg) <= tolerance_deg:
+                    consecutive_ok += 1
+                    if consecutive_ok >= stable_samples:
+                        return deg
+                else:
+                    consecutive_ok = 0
+            time.sleep(poll_interval)
+
+        counts, _ = self.get_latest_encoder()
+        last_deg = self.counts_to_degrees(counts) if counts is not None else None
+        raise TimeoutError(
+            f"Motor did not settle at {target_deg:.2f} deg within {timeout_s}s "
+            f"(last reading: {last_deg})"
+        )
+
+    def home(self, wait=True, timeout_s=15.0):
+        """Return to the encoder zero reference. Call this at the end of
+        every run (and from a finally block) so the physical zero stays
+        consistent across power cycles."""
+        print("\nHoming motor back to 0 deg...")
+        return self.move_to_angle(0.0, wait=wait, timeout_s=timeout_s)
 
     def final_position(self):
         """Prints and returns the current angle, or None if unavailable."""
