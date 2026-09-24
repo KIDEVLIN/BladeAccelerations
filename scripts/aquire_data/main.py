@@ -66,13 +66,13 @@ PCB_PORT = "COM12"
 
 LOADCELL_DEVICE = "Dev11"          # NI DAQ device name (same box motor.py's trigger line lives on)
 LOADCELL_SAMPLE_RATE_HZ = 1000.0   # hardware-timed analog sample rate
-RUN_LOAD_CELL = False               # False = accelerometer-only run, load cell skipped entirely
+RUN_LOAD_CELL = True               # False = accelerometer-only run, load cell skipped entirely
 
 RUN_TUNNEL_CONDITIONS = True       # False = skip wind tunnel conditions entirely
-AIRFOIL_CHORD_M = 0.19             # Reynolds number length scale -- set per experiment
+AIRFOIL_CHORD_M = 0.02             # Reynolds number length scale -- set per experiment
 
 ANGLES_FILE = "scripts/aquire_data/test_angles.xlsx"     # .xlsx, .csv, or .txt (one angle per line / row)
-OUTPUT_DIR = "Data/run_009"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
+OUTPUT_DIR = "Data/run_010"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
 
 SAMPLE_DURATION_S = 4         # how long to capture accel + load data at each angle
 SETTLE_TIME_S = 2             # pause after move, before capture starts
@@ -84,7 +84,7 @@ SETTLE_TIME_S = 2             # pause after move, before capture starts
 #   SWEEP_ANGLE_DEG:    blade azimuthal/sweep orientation for this run
 #   MOUNTING_ANGLE_DEG: fixed blade mounting angle for this run
 SWEEP_ANGLE_DEG = 30.0
-MOUNTING_ANGLE_DEG = 0.0
+MOUNTING_ANGLE_DEG = 97
 
 SETTLE_TOLERANCE_DEG = 0.1
 SETTLE_TIMEOUT_S = 10.0
@@ -307,7 +307,7 @@ def main():
     encoder_log_path = os.path.join(OUTPUT_DIR, "encoder_log.txt")
     motor = Motor(port=MOTOR_PORT, baud=MOTOR_BAUD, log_file=encoder_log_path)
     # plotter = LivePlotter(show_sweep=False, figsize=(8, 8), dpi=100)
-    plotter = LivePlotter(show_loadcell=False)
+    plotter = LivePlotter(show_loadcell=True)
     instr = pcb.connect(PCB_PORT)
     pcb.set_low_latency(instr.serial)
 
