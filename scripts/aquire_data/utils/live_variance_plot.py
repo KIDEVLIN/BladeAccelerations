@@ -1,5 +1,5 @@
 """
-live_plot.py
+live_variance_plot.py
 
 Live-updating diagnostic plots for the angle-sweep acquisition run in
 main.py. A single figure is created once at the start of a run and then
