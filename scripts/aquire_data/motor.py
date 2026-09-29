@@ -194,10 +194,10 @@ class Motor:
     # ----------------------------------------------------------------
 
     def degrees_to_counts(self, deg):
-        return int(round(deg * self.counts_per_deg))
+        return int(round(-deg * self.counts_per_deg))
 
     def counts_to_degrees(self, counts):
-        return counts / self.counts_per_deg
+        return -counts / self.counts_per_deg
 
     # ----------------------------------------------------------------
     # Public position query -- this is your motor.position()
@@ -385,7 +385,7 @@ class Motor:
                 time.sleep(0.01)
 
             avg_deg = (
-                (sum(samples) / len(samples)) / self.counts_per_deg
+                self.counts_to_degrees(sum(samples) / len(samples))
                 if samples
                 else None
             )
