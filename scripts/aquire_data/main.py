@@ -53,7 +53,7 @@ from utils import coordinate_transforms as ct
 import test_modbus as pcb
 import load_cell as lc
 import wind_tunnel_conditions as wtc
-from utils.live_varience_plot import LivePlotter, accel_magnitude_variance
+from utils.live_variance_plot import LivePlotter, accel_magnitude_variance
 
 # --------------------------------------------------
 # FOR YOU TO UPDATE BEFORE RUNS
