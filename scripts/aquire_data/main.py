@@ -84,7 +84,7 @@ SETTLE_TIME_S = 2             # pause after move, before capture starts
 #   SWEEP_ANGLE_DEG:    blade azimuthal/sweep orientation for this run
 #   MOUNTING_ANGLE_DEG: fixed blade mounting angle for this run
 SWEEP_ANGLE_DEG = 30.0
-MOUNTING_ANGLE_DEG = 97+120
+MOUNTING_ANGLE_DEG = 5.895
 
 SETTLE_TOLERANCE_DEG = 0.1
 SETTLE_TIMEOUT_S = 30

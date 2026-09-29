@@ -21,10 +21,10 @@ inclination_angle_deg_shifted / angle_of_attack_deg_shifted off
 coordinate_frame_angles.csv if that's present, and skips the map row
 entirely if neither is available.
 
-Since the map panel encodes variance as color, it can't also show 4
-overlaid per-sensor series without a second visual channel -- it's
-kept as the mean-across-sensors value (same as the original live
-plot); the per-sensor breakdown lives in the sweep row below it.
+Since the map panel encodes variance as color, it shows a single
+sensor (MAP_SENSOR, currently S4); the per-sensor breakdown lives in
+the sweep row below it. Accel variance is shown in g^2 (converted
+from the sensor's mg^2); no overall figure title (presentation use).
 """
 
 import sys
@@ -41,6 +41,11 @@ if str(_ACQUIRE_DIR) not in sys.path:
 from utils import coordinate_transforms as ct  # noqa: E402
 
 _ACCEL_COLORS = ["tab:blue", "tab:orange", "tab:green", "tab:purple"]
+
+# Accel variance is computed in mg^2 (sensor units); plots show g^2.
+MG2_TO_G2 = 1e-6
+# Sensor used for the wind-turbine-frame accel map (1-based, S4 = 4).
+MAP_SENSOR = 4
 
 
 def _motor_angles(captures):
@@ -89,14 +94,14 @@ def plot_variance_sweep(captures, out_path, sweep_angle_deg=None, mounting_angle
     row = 0
     if has_frame_angles:
         ax_map_accel = axes[row][0]
-        mean_accel_var = np.array([np.mean(list(v.values())) for v in per_sensor_var])
-        sc = ax_map_accel.scatter(inclinations, aoas, c=mean_accel_var, cmap="viridis")
+        map_accel_var = np.array([v[MAP_SENSOR] for v in per_sensor_var]) * MG2_TO_G2
+        sc = ax_map_accel.scatter(inclinations, aoas, c=map_accel_var, cmap="viridis")
         ax_map_accel.set_xlim(-45, 45)
         ax_map_accel.set_ylim(-180, 180)
         ax_map_accel.set_xlabel("Inclination angle (deg)")
         ax_map_accel.set_ylabel("Angle of attack / pitch (deg)")
-        ax_map_accel.set_title("Accel magnitude variance (mean of 4 sensors)")
-        fig.colorbar(sc, ax=ax_map_accel, label="Variance (mg^2)")
+        ax_map_accel.set_title(f"Accel magnitude variance (S{MAP_SENSOR})")
+        fig.colorbar(sc, ax=ax_map_accel, label="Variance (g^2)")
 
         if has_load:
             ax_map_load = axes[row][1]
@@ -112,10 +117,10 @@ def plot_variance_sweep(captures, out_path, sweep_angle_deg=None, mounting_angle
 
     ax_sweep_accel = axes[row][0]
     for s in range(4):
-        vals = np.array([v[s + 1] for v in per_sensor_var])[order]
+        vals = np.array([v[s + 1] for v in per_sensor_var])[order] * MG2_TO_G2
         ax_sweep_accel.plot(motor_angles[order], vals, "o-", color=_ACCEL_COLORS[s], label=f"S{s + 1}")
     ax_sweep_accel.set_xlabel("Motor angle (deg)")
-    ax_sweep_accel.set_ylabel("Accel magnitude variance (mg^2)")
+    ax_sweep_accel.set_ylabel("Accel magnitude variance (g^2)")
     ax_sweep_accel.set_title("Accel variance vs motor angle -- all 4 sensors")
     ax_sweep_accel.legend(fontsize=8)
 
@@ -127,8 +132,7 @@ def plot_variance_sweep(captures, out_path, sweep_angle_deg=None, mounting_angle
         ax_sweep_load.set_ylabel("Load-cell magnitude variance (N^2)")
         ax_sweep_load.set_title("Load-cell variance vs motor angle")
 
-    fig.suptitle("Variance diagnostics (post-run)")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"  Saved {out_path}")
