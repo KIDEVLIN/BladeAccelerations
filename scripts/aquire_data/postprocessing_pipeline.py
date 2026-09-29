@@ -83,10 +83,10 @@ def main():
     print(f"  Lowest accel variance:  {lowest.requested_angle_deg:+.2f} deg")
 
     plot_angle_timeseries(highest, out_dir / "timeseries_high_variance.png",
-                           title_prefix="[HIGH VARIANCE] ",
+                           case_label="High",
                            plot_window_s=args.plot_window_s)
     plot_angle_timeseries(lowest, out_dir / "timeseries_low_variance.png",
-                           title_prefix="[LOW VARIANCE] ",
+                           case_label="Low",
                            plot_window_s=args.plot_window_s)
     plot_variance_sweep(captures, out_dir / "variance_sweep.png",
                          sweep_angle_deg=args.sweep_angle_deg,
