@@ -72,9 +72,9 @@ RUN_TUNNEL_CONDITIONS = True       # False = skip wind tunnel conditions entirel
 AIRFOIL_CHORD_M = 0.02             # Reynolds number length scale -- set per experiment
 
 ANGLES_FILE = "scripts/aquire_data/test_angles.xlsx"     # .xlsx, .csv, or .txt (one angle per line / row)
-OUTPUT_DIR = "Data/Test_500"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
+OUTPUT_DIR = "Data/run3"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
 
-SAMPLE_DURATION_S = 15         # how long to capture accel + load data at each angle
+SAMPLE_DURATION_S = 2         # how long to capture accel + load data at each angle
 SETTLE_TIME_S = 2             # pause after move, before capture starts
 
 # Coordinate-frame constants (see utils/coordinate_transforms.py).
@@ -83,8 +83,8 @@ SETTLE_TIME_S = 2             # pause after move, before capture starts
 # starting a run.
 #   SWEEP_ANGLE_DEG:    blade azimuthal/sweep orientation for this run
 #   MOUNTING_ANGLE_DEG: fixed blade mounting angle for this run
-SWEEP_ANGLE_DEG = 30.0
-MOUNTING_ANGLE_DEG = 5.895
+SWEEP_ANGLE_DEG = -30.0
+MOUNTING_ANGLE_DEG = -5.895+90
 
 SETTLE_TOLERANCE_DEG = 0.1
 SETTLE_TIMEOUT_S = 30
