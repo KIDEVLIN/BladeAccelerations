@@ -285,7 +285,7 @@ class Motor:
         self._send("FL")
 
     def move_to_angle(self, target_deg, wait=True, tolerance_deg=0.1,
-                       stable_samples=3, timeout_s=10.0, poll_interval=0.01,
+                       stable_samples=3, timeout_s=30.0, poll_interval=0.01,
                        on_poll=None):
         """Absolute move to target_deg, computed relative to the last
         known encoder reading. Raises ValueError if target_deg is outside
@@ -326,7 +326,7 @@ class Motor:
         return None
 
     def wait_until_settled(self, target_deg, tolerance_deg=0.1,
-                            stable_samples=3, timeout_s=10.0, poll_interval=0.01,
+                            stable_samples=3, timeout_s=30.0, poll_interval=0.01,
                             on_poll=None):
         """Block until the background-thread encoder cache reports a
         position within tolerance_deg of target_deg for `stable_samples`
@@ -361,7 +361,7 @@ class Motor:
             f"(last reading: {last_deg})"
         )
 
-    def home(self, wait=True, timeout_s=15.0):
+    def home(self, wait=True, timeout_s=30.0):
         """Return to the encoder zero reference. Call this at the end of
         every run (and from a finally block) so the physical zero stays
         consistent across power cycles."""
