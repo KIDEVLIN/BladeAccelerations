@@ -16,19 +16,30 @@ Global:
     y - spanwise
     z - vertical
 
-Turbine:
-    x - pointing into turbine (down nacelle)
-    y - pointing to left on turbine seen from in front
+Mount:
+    x - perpendicular to mounting arm, streamwise direction for 0 deg motor 
+        angle, with the mounting arm pointing in the y direction
+    y - pointing from the motor to the mounting arm
     z - vertical
 
-Blade:
-    x - pointing into rotor plane
-    y - pointing to negative tangential direction in rotor plane
-    z - pointing up the blade (root to tip)
+Swept:
+    x - perpendicular to mounting arm, streamwise direction for 0 deg motor 
+        angle, with the mounting arm pointing in the y direction
+    y - pointing from the motor to the mounting arm
+    z - pointing up the blade from tip to root
 
 All angle arguments/returns for the low-level functions are in radians,
 matching the collaborator's original notebook. Degree-based convenience
 wrappers are provided at the bottom of this file.
+
+
+Angle conventions
+-----------------
+Motor angle: 0 deg is aligned with the global x axis, positive is clockwise
+Mounting angle: AoA when motor angle = 0 deg
+Sweep angle: 0 deg is vertical, negative is rotation about the mount x axis
+
+
 """
 
 import numpy as np
@@ -39,52 +50,53 @@ import numpy as np
 # --------------------------------------------------
 
 
-def global_to_turbine(U, yaw):
-    """Convert global wind components to turbine-aligned components based
-    on the yaw angle (rotation about the global z-axis)."""
+def global_to_mount(U, motor_angle):
+    """Convert global wind components to mount-aligned components based
+    on the motor angle."""
     u_g, v_g, w_g = U
     R = np.array([
-        [np.cos(yaw), -np.sin(yaw), 0],
-        [np.sin(yaw), np.cos(yaw), 0],
+        [np.cos(motor_angle), -np.sin(motor_angle), 0],
+        [np.sin(motor_angle), np.cos(motor_angle), 0],
         [0, 0, 1],
     ])
-    U_turbine = R @ np.array([u_g, v_g, w_g])
-    return U_turbine
+    U_mount = R @ np.array([u_g, v_g, w_g])
+    return U_mount
 
 
-def turbine_to_blade(U, azimuthal_angle):
-    """Convert turbine-aligned wind components to blade-aligned components
-    based on the azimuthal angle (rotation about the turbine x-axis)."""
-    u_t, v_t, w_t = U
-    rot_angle = azimuthal_angle
+def mount_to_swept(U, sweep_angle):
+    """Convert mount-aligned wind components to swept components
+    based on the sweep angle (rotation about the mount x-axis)."""
+    u_m, v_m, w_m = U
+    rot_angle = sweep_angle
     R = np.array([
         [1, 0, 0],
         [0, np.cos(rot_angle), -np.sin(rot_angle)],
         [0, np.sin(rot_angle), np.cos(rot_angle)],
     ])
-    U_blade = R @ np.array([u_t, v_t, w_t])
-    return U_blade
+    U_swept = R @ np.array([u_m, v_m, w_m])
+    return U_swept
 
 
-def inclination_from_blade(U):
+def inclination_from_swept(U):
     """Inclination angle of the wind relative to the blade, from the
-    blade-aligned wind components. Tip-to-root is positive."""
+    swept wind components. Tip-to-root is positive."""
     u_b, v_b, w_b = U
     horizontal_speed = np.sqrt(u_b ** 2 + v_b ** 2)
     # Negative sign because positive w_b is up the blade, but positive
     # inclination is defined as pointing down towards the root.
-    inclination_angle = np.arctan2(-w_b, horizontal_speed)
+    inclination_angle = np.arctan2(w_b, horizontal_speed)
     return inclination_angle
 
 
-def angle_of_attack_from_blade(U, pitch):
+def angle_of_attack_from_swept(U, mounting_angle):
     """Angle of attack of the wind relative to the blade chord line, from
-    the blade-aligned wind components and the (mounting/blade) pitch
+    the swept wind components and the (mounting/blade) pitch
     angle. `pitch` must be in radians, consistent with the other angles
     here."""
     u_b, v_b, w_b = U
-    wind_angle = np.arctan2(u_b, -v_b)
-    angle_of_attack = wind_angle - pitch
+    # wind_angle = np.arctan2(u_b, -v_b)
+    wind_angle = np.arctan2(v_b, u_b)
+    angle_of_attack = wind_angle + mounting_angle
     return angle_of_attack
 
 
@@ -116,15 +128,15 @@ def compute_frame_angles(motor_angle_deg, sweep_angle_deg, mounting_angle_deg,
     and angle of attack, plus the radian versions used in the calculation,
     so everything needed for a log file is available in one place.
     """
-    yaw = np.radians(motor_angle_deg)
-    azimuthal_angle = np.radians(sweep_angle_deg)
-    pitch = np.radians(mounting_angle_deg)
+    motor_angle_rad = np.radians(motor_angle_deg)
+    sweep_angle_rad = np.radians(sweep_angle_deg)
+    mounting_angle_rad = np.radians(mounting_angle_deg)
 
-    U_turbine = global_to_turbine(np.asarray(U_global, dtype=float), yaw)
-    U_blade = turbine_to_blade(U_turbine, azimuthal_angle)
+    U_mount = global_to_mount(np.asarray(U_global, dtype=float), motor_angle_rad)
+    U_swept = mount_to_swept(U_mount, sweep_angle_rad)
 
-    inclination_angle = inclination_from_blade(U_blade)
-    angle_of_attack = angle_of_attack_from_blade(U_blade, pitch)
+    inclination_angle = inclination_from_swept(U_swept)
+    angle_of_attack = angle_of_attack_from_swept(U_swept, mounting_angle_rad)
 
     inclination_angle_deg = np.degrees(inclination_angle)
     angle_of_attack_deg = np.degrees(angle_of_attack)
