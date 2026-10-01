@@ -30,6 +30,9 @@ import serial
 import threading
 import time
 import statistics
+# top of file, after imports
+ABS_MAX_TRAVEL_DEG = 360.0   # hard ceiling; max_travel_deg can be lowered but never raised past this
+LIMIT_MARGIN_DEG = 5.0       # tolerance on the current encoder reading before we refuse to move
 
 
 class Motor:
@@ -49,6 +52,12 @@ class Motor:
         self.poll_interval = poll_interval
         self.daq_line = daq_line
         self.max_travel_deg = max_travel_deg
+        if max_travel_deg > ABS_MAX_TRAVEL_DEG:
+            raise ValueError(
+                f"max_travel_deg={max_travel_deg} exceeds the hard limit of "
+                f"+/-{ABS_MAX_TRAVEL_DEG} deg")
+        # Largest legitimate single DI is a full swing from -max to +max
+        self._max_di_counts = int(round(2 * max_travel_deg * counts_per_deg)) + 1
 
         self._ser = None
 
@@ -85,6 +94,28 @@ class Motor:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
         return False
+
+    def _require_sane_position(self, current_counts):
+        """Refuse to move if the encoder says we're already outside the travel
+        limits -- that means a bad reading or a motor that's out of range."""
+        deg = self.counts_to_degrees(current_counts)
+        if abs(deg) > self.max_travel_deg + LIMIT_MARGIN_DEG:
+            raise RuntimeError(
+                f"Encoder reads {deg:+.1f} deg, outside the +/-{self.max_travel_deg:.0f} deg "
+                f"limit (+{LIMIT_MARGIN_DEG} deg margin) -- bad reading or motor out of "
+                f"range; refusing to move.")
+
+    def _send(self, cmd, delay=0.02):
+        # Last line of defence: no single DI may exceed a full -max..+max swing,
+        # whatever the caller computed.
+        if cmd.startswith("DI"):
+            di = int(cmd[2:])
+            if abs(di) > self._max_di_counts:
+                raise ValueError(
+                    f"Refusing {cmd}: {abs(di) / self.counts_per_deg:.1f} deg move exceeds "
+                    f"the {2 * self.max_travel_deg:.0f} deg maximum single move")
+        with self._serial_lock:
+            ...   # rest unchanged
 
     # ----------------------------------------------------------------
     # Lifecycle: start() / stop()
@@ -274,6 +305,9 @@ class Motor:
         absolute position would exceed +/- max_travel_deg."""
         current_counts, _ = self.get_latest_encoder()
         if current_counts is not None:
+            self._require_sane_position(current_counts)
+            projected_deg = ...   # existing code
+        if current_counts is not None:
             projected_deg = self.counts_to_degrees(current_counts) + angle_deg
             if abs(projected_deg) > self.max_travel_deg:
                 raise ValueError(
@@ -307,6 +341,9 @@ class Motor:
         current_counts, _ = self.get_latest_encoder()
         if current_counts is None:
             print("No encoder reading yet -- can't compute a relative move.")
+            # in move_to_angle(): after the "No encoder reading yet" early return
+            self._require_sane_position(current_counts)
+            print(f"Current counts: {current_counts}")   # makes a bad read visible in the log
             return None
 
         target_counts = self.degrees_to_counts(target_deg)

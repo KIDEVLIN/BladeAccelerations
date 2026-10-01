@@ -351,6 +351,9 @@ def main():
 
     encoder_log_path = os.path.join(OUTPUT_DIR, "encoder_log.txt")
     motor = Motor(port=MOTOR_PORT, baud=MOTOR_BAUD, log_file=encoder_log_path)
+    bad = [a for a in angles if abs(a) > motor.max_travel_deg]
+    if bad:
+        raise ValueError(f"Angles outside +/-{motor.max_travel_deg:.0f} deg: {bad}")
     instr = pcb.connect(PCB_PORT)
     pcb.set_low_latency(instr.serial)
 
