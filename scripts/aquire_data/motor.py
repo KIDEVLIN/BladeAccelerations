@@ -25,6 +25,14 @@ if an exception is raised):
         print(motor.position())
 """
 
+import re                      # top of file
+
+_IP_REPLY_RE = re.compile(rb"IP=([0-9A-Fa-f]{1,8})\r")
+_IP_8DIG_RE = re.compile(rb"IP=([0-9A-Fa-f]{8})")
+MAX_PLAUSIBLE_DEG_PER_S = 1000.0   # generous; VE1 is ~360 deg/s
+JUMP_BASE_DEG = 5.0
+RESYNC_AFTER = 50                  # accept a new baseline after this many consecutive rejects
+
 import nidaqmx
 import serial
 import threading
@@ -52,6 +60,7 @@ class Motor:
         self.poll_interval = poll_interval
         self.daq_line = daq_line
         self.max_travel_deg = max_travel_deg
+        self.rejected_reads = 0
         if max_travel_deg > ABS_MAX_TRAVEL_DEG:
             raise ValueError(
                 f"max_travel_deg={max_travel_deg} exceeds the hard limit of "
@@ -181,35 +190,49 @@ class Motor:
         return data.decode(errors="ignore").strip() if data else ""
 
     def _read_encoder_counts_locked(self):
-        """Does the actual IP write/read/parse. Caller must already hold
-        _serial_lock -- this method does not lock on its own."""
+        """Caller must hold _serial_lock."""
+        self._ser.reset_input_buffer()           # drop stale acks / half replies
         self._ser.write(b"IP\r")
-        time.sleep(0.0012)
-        data = self._ser.read(self._ser.in_waiting)
-        if not data:
+        buf = b""
+        for _ in range(3):
+            line = self._ser.read_until(b"\r")   # blocks until CR or the port timeout
+            buf += line
+            m = _IP_REPLY_RE.search(line)
+            if m:
+                break
+            if not line.endswith(b"\r"):
+                m = _IP_8DIG_RE.search(buf)      # no CR seen: only trust a full 8-digit value
+                break
+        else:
+            m = None
+        if m is None:
             return None
-        try:
-            resp = data.decode(errors="ignore").strip()
-            if "=" not in resp:
-                return None
-            hex_val = resp.split("=")[1]
-            counts = int(hex_val, 16)
-            if counts >= 0x80000000:
-                counts -= 0x100000000
-            return counts
-        except Exception:
-            return None
+        counts = int(m.group(1), 16)
+        if counts >= 0x80000000:
+            counts -= 0x100000000
+        return counts
 
     # ----------------------------------------------------------------
     # Background encoder polling / logging thread
     # ----------------------------------------------------------------
 
     def _encoder_poll_loop(self):
+        last_counts, last_t, n_rej = None, None, 0
         while not self._stop_polling.is_set():
             with self._serial_lock:
                 counts = self._read_encoder_counts_locked()
             if counts is not None:
                 t = time.perf_counter() - self._start_time
+                if last_counts is not None and n_rej < RESYNC_AFTER:
+                    jump_deg = abs(counts - last_counts) / self.counts_per_deg
+                    if jump_deg > JUMP_BASE_DEG + MAX_PLAUSIBLE_DEG_PER_S * (t - last_t):
+                        n_rej += 1
+                        self.rejected_reads += 1
+                        time.sleep(self.poll_interval)
+                        continue
+                if n_rej >= RESYNC_AFTER:
+                    print(f"  WARN: {n_rej} consecutive implausible encoder reads -- resyncing")
+                n_rej, last_counts, last_t = 0, counts, t
                 with self._encoder_lock:
                     self._latest_counts = counts
                     self._latest_time = t
