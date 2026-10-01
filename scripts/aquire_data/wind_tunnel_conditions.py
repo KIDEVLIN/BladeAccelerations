@@ -36,6 +36,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, fields
+import numpy as np
 
 import nidaqmx
 from nidaqmx.constants import AcquisitionType, TerminalConfiguration
@@ -136,13 +137,18 @@ def _z_correction(temp_k: float, press_atm: float) -> float:
 
 
 def compute_conditions(freestream_dp_v, traverse_dp_v, static_pressure_v, temperature_v,
-                        length_scale_m=DEFAULT_LENGTH_SCALE_M, timestamp=None) -> WindTunnelConditions:
+                        length_scale_m=DEFAULT_LENGTH_SCALE_M, timestamp=None,
+                        freestream_zero_v=0.0, traverse_zero_v=0.0) -> WindTunnelConditions:
     """Converts the 4 raw channel means (volts) into engineering
     conditions, following load_tunnel_conditions.m's
     read_tunnel_conditions() exactly.
     """
     if timestamp is None:
         timestamp = time.time()
+    # Remove the fan-off DC offset (see measure_zero_offsets). From here on,
+    # freestream_dp_v / traverse_dp_v (and the fields stored from them) are zero-corrected.
+    freestream_dp_v = freestream_dp_v - freestream_zero_v
+    traverse_dp_v = traverse_dp_v - traverse_zero_v
 
     # --- Temperature: volts -> degF -> degC (matches the .m script,
     # which does NOT add 273.15 here -- Kelvin is computed separately
@@ -201,6 +207,66 @@ def compute_conditions(freestream_dp_v, traverse_dp_v, static_pressure_v, temper
         reynolds_number=reynolds,
     )
 
+# --------------------------------------------------
+# Zero (tare) measurement -- fan OFF
+# --------------------------------------------------
+
+
+@dataclass
+class ZeroOffsets:
+    """DC offsets (volts) of the two velocity-related dP channels,
+    measured with the tunnel fan off. Subtracted in compute_conditions()."""
+    freestream_dp_v: float
+    traverse_dp_v: float
+    freestream_dp_std_v: float
+    traverse_dp_std_v: float
+    freestream_dp_drift_v: float   # mean(last third) - mean(first third); ~0 if settled
+    traverse_dp_drift_v: float
+    duration_s: float
+    n_samples: int
+    timestamp: float
+
+
+def measure_zero_offsets(duration_s=30.0, sample_rate=SAMPLING_RATE_HZ) -> ZeroOffsets:
+    """Reads all 4 channels for duration_s (call with the fan OFF) and
+    returns the mean/std/drift of the freestream and traverse dP channels.
+    Static pressure and temperature are read but not zeroed -- they are
+    real absolute measurements, not offsets."""
+    chunk = int(sample_rate)               # 1 s per read, so progress can print
+    n_chunks = int(math.ceil(duration_s))
+    chunks = []
+    with nidaqmx.Task() as task:
+        for chan in (CHANNEL_FREESTREAM_DP, CHANNEL_TRAVERSE_DP,
+                     CHANNEL_STATIC_PRESSURE, CHANNEL_TEMPERATURE):
+            task.ai_channels.add_ai_voltage_chan(
+                chan, terminal_config=AI_TERMINAL_CONFIG,
+                min_val=AI_MIN_V, max_val=AI_MAX_V,
+            )
+        task.timing.cfg_samp_clk_timing(
+            sample_rate, sample_mode=AcquisitionType.CONTINUOUS,
+            samps_per_chan=chunk * 10,
+        )
+        task.start()
+        for k in range(n_chunks):
+            chunks.append(np.asarray(task.read(number_of_samples_per_channel=chunk,
+                                                timeout=5.0)))
+            print(f"\r  Zeroing: {k + 1}/{n_chunks} s", end="", flush=True)
+        print()
+
+    data = np.concatenate(chunks, axis=1)   # (4, N); order matches the channel list
+    fs, tr = data[0], data[1]
+    n3 = max(1, data.shape[1] // 3)
+
+    def drift(x):
+        return float(x[-n3:].mean() - x[:n3].mean())
+
+    return ZeroOffsets(
+        freestream_dp_v=float(fs.mean()), traverse_dp_v=float(tr.mean()),
+        freestream_dp_std_v=float(fs.std()), traverse_dp_std_v=float(tr.std()),
+        freestream_dp_drift_v=drift(fs), traverse_dp_drift_v=drift(tr),
+        duration_s=duration_s, n_samples=int(data.shape[1]), timestamp=time.time(),
+    )
+
 
 # --------------------------------------------------
 # Single-shot read (handy for a quick standalone check)
@@ -253,7 +319,10 @@ class TunnelConditionsCollector:
     """
 
     def __init__(self, length_scale_m=DEFAULT_LENGTH_SCALE_M,
-                 num_samples=NUMBER_OF_SAMPLES, sample_rate=SAMPLING_RATE_HZ):
+                 num_samples=NUMBER_OF_SAMPLES, sample_rate=SAMPLING_RATE_HZ,
+                 zero_offsets=None):                       # NEW
+        self._fs_zero = zero_offsets.freestream_dp_v if zero_offsets else 0.0   # NEW
+        self._tr_zero = zero_offsets.traverse_dp_v if zero_offsets else 0.0     # NEW
         self.length_scale_m = length_scale_m
         self.num_samples = num_samples
         self.sample_rate = sample_rate
@@ -294,7 +363,9 @@ class TunnelConditionsCollector:
             means = [sum(ch) / len(ch) for ch in data]
             freestream_v, traverse_v, static_v, temp_v = means
             reading = compute_conditions(freestream_v, traverse_v, static_v, temp_v,
-                                          length_scale_m=self.length_scale_m)
+                                          length_scale_m=self.length_scale_m,
+                                          freestream_zero_v=self._fs_zero,
+                                          traverse_zero_v=self._tr_zero)
             with self._lock:
                 self._readings.append(reading)
 
@@ -325,6 +396,8 @@ class TunnelConditionsCollector:
         print(f"  Tunnel conditions: background collection stopped ({len(readings)} batches).")
 
         summary = {"sample_count": len(readings), "length_scale_m": self.length_scale_m}
+        summary["freestream_zero_offset_v"] = self._fs_zero
+        summary["traverse_zero_offset_v"] = self._tr_zero
         for field_name in _AVERAGE_FIELDS:
             vals = [getattr(r, field_name) for r in readings]
             vals = [v for v in vals if not (isinstance(v, float) and math.isnan(v))]

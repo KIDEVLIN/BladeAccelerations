@@ -29,6 +29,7 @@ import nidaqmx
 import serial
 import threading
 import time
+import statistics
 
 
 class Motor:
@@ -64,6 +65,7 @@ class Motor:
         self._encoder_lock = threading.Lock()
         self._latest_counts = None
         self._latest_time = None
+        self._history = []
 
         self._stop_polling = threading.Event()
         self._poll_thread = None
@@ -95,8 +97,9 @@ class Motor:
             self.port, self.baud, timeout=0.1, write_timeout=0.1
         )
         self._log_file = open(self._log_path, "w", buffering=1)
-        self._log_file.write("time_sec, encoder_counts\n")
         self._start_time = time.perf_counter()
+        self._log_file.write(f"# start_time_perf_counter={self._start_time:.6f}\n")
+        self._log_file.write("time_sec, encoder_counts\n")
 
         self._stop_polling.clear()
         self._poll_thread = threading.Thread(
@@ -179,6 +182,7 @@ class Motor:
                 with self._encoder_lock:
                     self._latest_counts = counts
                     self._latest_time = t
+                    self._history.append((t, counts))
                 self._log_file.write(f"{t:.6f}, {counts}\n")
             time.sleep(self.poll_interval)
 
@@ -248,6 +252,19 @@ class Motor:
             print(f"Position zeroed. Encoder now reads {counts} counts.")
         else:
             print("Warning: no encoder reading available yet.")
+
+    def angle_stats(self, t0_abs, t1_abs):
+        """(mean_deg, std_deg, n) of the ENCODER angle over [t0_abs, t1_abs],
+        in time.perf_counter() terms (same clock as the capture t_start values).
+        Returns (None, None, 0) if no encoder samples fall in the window."""
+        t0 = t0_abs - self._start_time
+        t1 = t1_abs - self._start_time
+        with self._encoder_lock:
+            counts = [c for (t, c) in self._history if t0 <= t <= t1]
+        if not counts:
+            return None, None, 0
+        degs = [self.counts_to_degrees(c) for c in counts]
+        return statistics.fmean(degs), statistics.pstdev(degs), len(degs)
 
     def move(self, angle_deg):
         """Relative move by angle_deg. Raises ValueError if the resulting

@@ -45,6 +45,10 @@ import os
 import threading
 import time
 from pathlib import Path
+import json
+import math
+from dataclasses import asdict
+from datetime import datetime
 
 import pandas as pd
 
@@ -67,6 +71,10 @@ PCB_PORT = "COM12"
 LOADCELL_DEVICE = "Dev11"          # NI DAQ device name (same box motor.py's trigger line lives on)
 LOADCELL_SAMPLE_RATE_HZ = 1000.0   # hardware-timed analog sample rate
 RUN_LOAD_CELL = True               # False = accelerometer-only run, load cell skipped entirely
+
+RUN_ZERO_MEASUREMENT = True   # fan-off tare of the pitot dP channels (needs RUN_TUNNEL_CONDITIONS)
+ZERO_DURATION_S = 30          # length of the fan-off zero measurement
+ZERO_WARN_V = 10            # warn if a measured offset magnitude exceeds this (V)
 
 RUN_TUNNEL_CONDITIONS = True       # False = skip wind tunnel conditions entirely
 AIRFOIL_CHORD_M = 0.02             # Reynolds number length scale -- set per experiment
@@ -292,6 +300,43 @@ def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path=None, 
 
     return result
 
+def run_zero_procedure():
+    """Interactive fan-off zero, then wait for the user to confirm the fan is on.
+    Returns a wtc.ZeroOffsets."""
+    while True:
+        input("\nTurn the tunnel fan OFF and let the air settle.\n"
+              f"Press Enter to start the {ZERO_DURATION_S:.0f} s zero measurement... ")
+        zero = wtc.measure_zero_offsets(ZERO_DURATION_S)
+        print(f"  Freestream dP offset: {zero.freestream_dp_v:+.5f} V "
+              f"(std {zero.freestream_dp_std_v:.5f}, drift {zero.freestream_dp_drift_v:+.5f})")
+        print(f"  Traverse   dP offset: {zero.traverse_dp_v:+.5f} V "
+              f"(std {zero.traverse_dp_std_v:.5f}, drift {zero.traverse_dp_drift_v:+.5f})")
+        if max(abs(zero.freestream_dp_v), abs(zero.traverse_dp_v)) > ZERO_WARN_V:
+            print(f"  WARN: an offset exceeds {ZERO_WARN_V} V -- is the fan really off and the flow settled?")
+        if input("Press Enter to accept, or type 'r' to repeat: ").strip().lower() != "r":
+            break
+    input("\nTurn the tunnel fan ON and bring it up to speed.\n"
+          "Press Enter when ready to continue... ")
+    return zero
+
+
+def _json_safe(o):
+    if isinstance(o, dict):
+        return {k: _json_safe(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_json_safe(v) for v in o]
+    if isinstance(o, float) and (math.isnan(o) or math.isinf(o)):
+        return None
+    return o
+
+
+def write_run_metadata(path, meta):
+    """Atomic write, so a crash mid-write can't corrupt the file."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(_json_safe(meta), f, indent=2, default=str)
+    os.replace(tmp, path)
+
 
 # --------------------------------------------------
 # Main sweep
@@ -306,12 +351,8 @@ def main():
 
     encoder_log_path = os.path.join(OUTPUT_DIR, "encoder_log.txt")
     motor = Motor(port=MOTOR_PORT, baud=MOTOR_BAUD, log_file=encoder_log_path)
-    # plotter = LivePlotter(show_sweep=False, figsize=(8, 8), dpi=100)
-    plotter = LivePlotter(show_loadcell=True)
     instr = pcb.connect(PCB_PORT)
     pcb.set_low_latency(instr.serial)
-
-    tunnel_collector = wtc.TunnelConditionsCollector(length_scale_m=AIRFOIL_CHORD_M) if RUN_TUNNEL_CONDITIONS else None
 
     print(
         f"Coordinate-frame constants for this run: "
@@ -321,17 +362,62 @@ def main():
     angle_log_path = os.path.join(OUTPUT_DIR, "coordinate_frame_angles.csv")
     angle_log_fields = [
         "index", "motor_angle_requested_deg", "motor_angle_actual_deg",
+        "motor_angle_std_deg", "motor_angle_n_samples", "motor_angle_source",
         "sweep_angle_deg", "mounting_angle_deg",
         "inclination_angle_deg", "inclination_angle_deg_shifted",
         "angle_of_attack_deg", "angle_of_attack_deg_shifted",
         "accel_csv_path", "load_csv_path",
         "accel_t_start", "load_t_start", "sync_offset_ms",
-        "accel_variance",
+        "accel_variance", "load_variance",
     ]
 
+    metadata = {
+        "run_dir": OUTPUT_DIR,
+        "status": "in_progress",
+        "start_time": datetime.now().isoformat(timespec="seconds"),
+        "sweep_angle_deg": SWEEP_ANGLE_DEG,
+        "mounting_angle_deg": MOUNTING_ANGLE_DEG,
+        "airfoil_chord_m": AIRFOIL_CHORD_M,
+        "sample_duration_s": SAMPLE_DURATION_S,
+        "settle_time_s": SETTLE_TIME_S,
+        "counts_per_deg": motor.counts_per_deg,
+        "loadcell_sample_rate_hz": LOADCELL_SAMPLE_RATE_HZ,
+        "run_load_cell": RUN_LOAD_CELL,
+        "run_tunnel_conditions": RUN_TUNNEL_CONDITIONS,
+        "angles_requested": angles,
+        "zero_measurement": None,
+        "tunnel_conditions": None,
+        "angles": [],
+    }
+    metadata_path = os.path.join(OUTPUT_DIR, "run_metadata.json")
+    write_run_metadata(metadata_path, metadata)   # written up front so a crashed run still has its config
+
+    plotter = None
+    tunnel_collector = None
+    tunnel_started = False
+    tunnel_summary = None
+    completed = False
 
     motor.start()
+    angle_log_file = open(angle_log_path, "w", newline="")
+    angle_writer = csv.DictWriter(angle_log_file, fieldnames=angle_log_fields)
+    angle_writer.writeheader()
+
     try:
+        # ---- Tunnel conditions: fan-off zero -> wait for fan on -> start collector ----
+        if RUN_TUNNEL_CONDITIONS:
+            zero = run_zero_procedure() if RUN_ZERO_MEASUREMENT else None
+            metadata["zero_measurement"] = asdict(zero) if zero else None
+            write_run_metadata(metadata_path, metadata)
+
+            tunnel_collector = wtc.TunnelConditionsCollector(
+                length_scale_m=AIRFOIL_CHORD_M, zero_offsets=zero)
+            tunnel_collector.start()
+            tunnel_started = True
+
+        # plotter = LivePlotter(show_sweep=False, figsize=(8, 8), dpi=100)
+        plotter = LivePlotter(show_loadcell=True)
+
         for i, angle in enumerate(angles):
             print(f"\n=== Angle {i + 1}/{len(angles)}: {angle:+.2f} deg ===")
 
@@ -352,38 +438,103 @@ def main():
             load_csv_path = (
                 os.path.join(OUTPUT_DIR, f"angle_{angle:+07.2f}deg_load.csv")
                 if RUN_LOAD_CELL else None
-            )                                                             # NEW
+            )
 
-            sync_result = collect_synchronized(                          # CHANGED — was collect_accel_for_duration
+            sync_result = collect_synchronized(
                 instr, SAMPLE_DURATION_S, csv_path,
                 load_csv_path=load_csv_path, on_poll=plotter.pump,
             )
             accel_var = sync_result["accel_variance"]
-            load_var = sync_result.get("load_variance")                  # None when RUN_LOAD_CELL is False
+            load_var = sync_result.get("load_variance")
 
-            frame_angles = ct.compute_frame_angles(
-                motor_angle_deg=actual if actual is not None else angle,
-                sweep_angle_deg=SWEEP_ANGLE_DEG,
-                mounting_angle_deg=MOUNTING_ANGLE_DEG,
-            )
+            # ---- Motor angle comes from the ENCODER, never the commanded angle ----
+            # Preferred: mean encoder angle over the capture window. Fallback: the
+            # settled encoder reading from move_to_angle. If neither exists the
+            # angle is left unset -- it is NOT replaced by the requested angle.
+            t0 = sync_result["accel_t_start"]
+            if "load_t_start" in sync_result:
+                t0 = min(t0, sync_result["load_t_start"])
+            enc_mean, enc_std, enc_n = motor.angle_stats(t0, t0 + SAMPLE_DURATION_S)
+            if enc_n > 0:
+                motor_angle, angle_source = enc_mean, "encoder_window_mean"
+            elif actual is not None:
+                motor_angle, angle_source, enc_std = actual, "encoder_settled", None
+            else:
+                motor_angle, angle_source, enc_std = None, "unavailable", None
+                print("  WARN: no encoder data for this angle -- frame angles and plot point skipped")
 
-            plotter.add_point(
-                motor_angle_deg=actual if actual is not None else angle,
-                inclination_deg=frame_angles["inclination_angle_deg_shifted"],
-                aoa_deg=frame_angles["angle_of_attack_deg_shifted"],
-                accel_variance=accel_var,
-                loadcell_variance=load_var,                              # NEW — this is the wiring that was missing
-            )
+            row = {
+                "index": i,
+                "motor_angle_requested_deg": angle,
+                "motor_angle_actual_deg": motor_angle,
+                "motor_angle_std_deg": enc_std,
+                "motor_angle_n_samples": enc_n,
+                "motor_angle_source": angle_source,
+                "sweep_angle_deg": SWEEP_ANGLE_DEG,
+                "mounting_angle_deg": MOUNTING_ANGLE_DEG,
+                "accel_csv_path": csv_path,
+                "load_csv_path": load_csv_path,
+                "accel_t_start": sync_result["accel_t_start"],
+                "load_t_start": sync_result.get("load_t_start"),
+                "sync_offset_ms": (
+                    (sync_result["load_t_start"] - sync_result["accel_t_start"]) * 1000.0
+                    if "load_t_start" in sync_result else None),
+                "accel_variance": accel_var,
+                "load_variance": load_var,
+            }
+
+            if motor_angle is not None:
+                frame_angles = ct.compute_frame_angles(
+                    motor_angle_deg=motor_angle,
+                    sweep_angle_deg=SWEEP_ANGLE_DEG,
+                    mounting_angle_deg=MOUNTING_ANGLE_DEG,
+                )
+                for k in ("inclination_angle_deg", "inclination_angle_deg_shifted",
+                          "angle_of_attack_deg", "angle_of_attack_deg_shifted"):
+                    row[k] = frame_angles[k]
+
+                plotter.add_point(
+                    motor_angle_deg=motor_angle,
+                    inclination_deg=frame_angles["inclination_angle_deg_shifted"],
+                    aoa_deg=frame_angles["angle_of_attack_deg_shifted"],
+                    accel_variance=accel_var,
+                    loadcell_variance=load_var,
+                )
+
+            angle_writer.writerow(row)
+            angle_log_file.flush()
+            metadata["angles"].append(row)
 
         print("\nAll angles complete.")
+        completed = True
+
+        # Stop collecting before the homing move so it doesn't pollute the averages
+        if tunnel_started:
+            tunnel_summary = tunnel_collector.stop()
+            tunnel_started = False
     finally:
+        if tunnel_started:
+            try:
+                tunnel_summary = tunnel_collector.stop()
+            except Exception as e:
+                print(f"  WARN: failed to stop tunnel collector: {e}")
+        if tunnel_summary is not None:
+            wtc.save_summary(tunnel_summary, output_dir=OUTPUT_DIR)   # per-run, not Data/wind_tunnel
+            metadata["tunnel_conditions"] = tunnel_summary
+
+        metadata["status"] = "complete" if completed else "aborted"
+        metadata["end_time"] = datetime.now().isoformat(timespec="seconds")
+        write_run_metadata(metadata_path, metadata)
+        angle_log_file.close()
+
         try:
             motor.home()
         except Exception as e:
             print(f"  WARN: failed to home motor: {e}")
         motor.stop()
-        plotter.save(OUTPUT_DIR)                                          # NEW — writes live_diagnostics.png
-        plotter.close()                                                   # NEW
+        if plotter is not None:
+            plotter.save(OUTPUT_DIR)
+            plotter.close()                                                 # NEW
 
 
 if __name__ == "__main__":
