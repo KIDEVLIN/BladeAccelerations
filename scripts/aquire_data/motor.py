@@ -264,7 +264,10 @@ class Motor:
         if not counts:
             return None, None, 0
         degs = [self.counts_to_degrees(c) for c in counts]
-        return statistics.fmean(degs), statistics.pstdev(degs), len(degs)
+        n = len(degs)
+        mean = sum(degs) / n
+        std = (sum((d - mean) ** 2 for d in degs) / n) ** 0.5   # population std
+        return mean, std, n
 
     def move(self, angle_deg):
         """Relative move by angle_deg. Raises ValueError if the resulting
