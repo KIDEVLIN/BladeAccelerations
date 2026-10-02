@@ -20,8 +20,8 @@ Conventions
     run_metadata.json), so runs with different blade setups land in the
     right place on the map.
 
-`sensors` selects the accelerometer series: "mean" (average of the 4
-per-sensor variances), or sensor numbers 1-4, in any combination.
+`sensors` selects the accelerometer series (sensor numbers 1-4). The
+default is sensor 4 only; sensors are never averaged together.
 """
 
 from dataclasses import dataclass
@@ -70,14 +70,12 @@ class _Prepared:
         ])
 
     def accel_series(self, sensor):
-        """sensor: "mean" or 1-based sensor number -> (n_angles,) array."""
-        if sensor == "mean":
-            return self.accel.mean(axis=1)
+        """sensor: 1-based sensor number -> (n_angles,) array."""
         return self.accel[:, sensor - 1]
 
 
 def _sensor_name(sensor):
-    return "mean of sensors" if sensor == "mean" else f"S{sensor}"
+    return f"S{sensor}"
 
 
 def _colors(n):
@@ -167,10 +165,10 @@ def _plot_map(runs, values_of, title, cbar_label, cmap, out_path):
     return True
 
 
-def plot_variance_comparison(runs, plots, out_dir, sensors=("mean",), map_sensor=4):
+def plot_variance_comparison(runs, plots, out_dir, sensors=(4,), map_sensor=4):
     """runs: list[RunData]. plots: iterable of names from PLOT_NAMES.
-    sensors: accel series for accel_sweep ("mean" and/or 1-4).
-    map_sensor: "mean" or 1-4, the sensor shown in accel_map.
+    sensors: accel series for accel_sweep (sensor numbers 1-4).
+    map_sensor: 1-4, the sensor shown in accel_map.
     Returns the list of PNG paths written."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

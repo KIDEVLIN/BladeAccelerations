@@ -6,7 +6,7 @@ more acquisition runs.
 Usage (from the repo root):
     python scripts/aquire_data/postprocessing_pipeline.py Data/run3 Data/run4 Data/run5
     python scripts/aquire_data/postprocessing_pipeline.py Data/run3 Data/run4 \
-        --plots accel_sweep load_map --sensors 1 4 --labels "rough" "smooth" \
+        --plots accel_sweep load_map --labels "rough" "smooth" \
         --out Data/comparison_rough_vs_smooth
 
 Positional arguments are run directories (folders written by main.py, each
@@ -19,10 +19,9 @@ drawn on the same axes.
     accel_map     inclination vs angle of attack, colored by accel variance
     load_map      inclination vs angle of attack, colored by load-cell variance
 
---sensors picks the accelerometer series in accel_sweep: "mean" (average of
-the 4 sensors), "all", or sensor numbers, e.g. "--sensors 1 4". Default is
-"all" for a single run and "mean" when several runs are overlaid (4 sensors x
-N runs gets unreadable). --map-sensor picks the sensor shown in accel_map.
+Accelerometer plots use the magnitude of sensor 4 only (never averaged across
+sensors). --sensor N picks a different one (1-4) for both accel_sweep and
+accel_map.
 
 Run settings (counts_per_deg, sample duration, sweep angle, mounting angle)
 are read from each run's run_metadata.json, so runs with different blade
@@ -75,24 +74,6 @@ def make_labels(run_dirs, labels):
     return names
 
 
-def parse_sensors(values, n_runs):
-    """-> list of "mean" and/or ints 1-4."""
-    if not values:
-        values = ["all"] if n_runs == 1 else ["mean"]
-    out = []
-    for v in values:
-        v = str(v).lower()
-        if v == "all":
-            out.extend([1, 2, 3, 4])
-        elif v == "mean":
-            out.append("mean")
-        elif v in ("1", "2", "3", "4"):
-            out.append(int(v))
-        else:
-            raise SystemExit(f"Bad --sensors value {v!r}: use mean, all, or 1-4")
-    return list(dict.fromkeys(out))   # de-dupe, keep order
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -102,11 +83,8 @@ def main():
                         help="which variance plots to make (default: all)")
     parser.add_argument("--labels", nargs="+", default=None,
                         help="legend labels, one per run (default: folder names)")
-    parser.add_argument("--sensors", nargs="+", default=None,
-                        help="accel_sweep series: mean, all, or 1-4 (default: all "
-                             "for one run, mean for several)")
-    parser.add_argument("--map-sensor", default="4",
-                        help="sensor shown in accel_map: mean or 1-4 (default 4)")
+    parser.add_argument("--sensor", type=int, default=4, choices=[1, 2, 3, 4],
+                        help="accelerometer used for accel_sweep and accel_map (default 4)")
     parser.add_argument("--out", default=None, help="output directory")
     parser.add_argument("--counts-per-deg", type=float, default=None,
                         help="override Motor counts_per_deg for all runs")
@@ -124,10 +102,6 @@ def main():
             raise SystemExit(f"Run directory not found: {d}")
 
     plots = list(PLOT_NAMES) if "all" in args.plots else list(dict.fromkeys(args.plots))
-    sensors = parse_sensors(args.sensors, len(run_dirs))
-    map_sensor = "mean" if args.map_sensor.lower() == "mean" else int(args.map_sensor)
-    if map_sensor != "mean" and map_sensor not in (1, 2, 3, 4):
-        raise SystemExit("--map-sensor must be mean or 1-4")
     labels = make_labels(run_dirs, args.labels)
 
     runs = []
@@ -157,7 +131,8 @@ def main():
         run_dirs[0] / "analysis" if len(run_dirs) == 1 else Path("Data/comparison"))
 
     print(f"\nPlotting {', '.join(plots)} for {len(runs)} run(s)")
-    plot_variance_comparison(runs, plots, out_dir, sensors=sensors, map_sensor=map_sensor)
+    plot_variance_comparison(runs, plots, out_dir, sensors=(args.sensor,),
+                             map_sensor=args.sensor)
     print(f"\nDone. Output in {out_dir}")
 
 
