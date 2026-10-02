@@ -3,11 +3,10 @@
 Post-processing pipeline entry point: overlay the variance plots of one or
 more acquisition runs.
 
-Usage (from the repo root):
+Usage (from the repo root). Put it all on one line, or continue lines with
+a backtick in PowerShell (a backslash in bash):
     python scripts/aquire_data/postprocessing_pipeline.py Data/run3 Data/run4 Data/run5
-    python scripts/aquire_data/postprocessing_pipeline.py Data/run3 Data/run4 \
-        --plots accel_sweep load_map --labels "rough" "smooth" \
-        --out Data/comparison_rough_vs_smooth
+    python scripts/aquire_data/postprocessing_pipeline.py Data/run3 Data/run4 --plots accel_sweep load_map --labels "rough" "smooth" --out Data/comparison
 
 Positional arguments are run directories (folders written by main.py, each
 holding angle_*.csv, encoder_log.txt and run_metadata.json). All of them are
