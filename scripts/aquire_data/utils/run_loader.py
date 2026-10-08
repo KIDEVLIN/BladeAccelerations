@@ -157,7 +157,7 @@ def windowed_average_angle(encoder_df, abs_start, window_start, duration_s, coun
     counts = encoder_df["encoder_counts"].to_numpy(dtype=float)[mask]
     if len(counts) == 0:
         return None, 0, None
-    degrees = counts / counts_per_deg
+    degrees = -counts / counts_per_deg  # same sign as Motor.counts_to_degrees()
     return float(degrees.mean()), int(len(counts)), float(degrees.std())
 
 

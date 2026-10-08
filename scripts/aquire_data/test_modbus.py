@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
 """
-Step 2 verification: Modbus RTU test for AF10R0 accelerometer board.
+.. module:: test_modbus
+   :platform: Linux, Windows
+   :synopsis: Modbus RTU test and streaming tool for AF10R1 4-channel accelerometer board.
+
+.. moduleauthor:: Paul Bengtsson
 
 Reads status, starts sampling, verifies FIFO data flow and XYZ values
-from 4x LIS2DS12 sensors via RS485 at 921600 baud.
+from 4x LIS2DS12 sensors via RS485 at 921600 baud. Supports configurable
+full-scale range (2g/4g/8g/16g) and output data rate (100--1600 Hz).
 
-Usage:
-    python test_modbus.py /dev/ttyUSB0                  # run tests
-    python test_modbus.py /dev/ttyUSB0 stream            # stream to auto-named CSV
-    python test_modbus.py /dev/ttyUSB0 stream data.csv   # stream to named CSV
+Usage::
 
-Requirements:
+    python test_modbus.py /dev/ttyUSB0                          # run tests (2g/1600Hz)
+    python test_modbus.py /dev/ttyUSB0 --fs 4g --odr 800        # test with 4g/800Hz
+    python test_modbus.py /dev/ttyUSB0 stream                   # stream to auto-named CSV
+    python test_modbus.py /dev/ttyUSB0 stream data.csv --fs 8g  # stream with 8g
+
+Requirements::
+
     pip install minimalmodbus
 """
 
+import argparse
 import csv
 import os
 import struct
@@ -35,8 +44,10 @@ REG_S1_X      = 0x0010
 REG_BULK      = 0x0100
 
 # Holding registers (FC06)
-REG_CMD  = 0x0000
-REG_ADDR = 0x0001
+REG_CMD      = 0x0000
+REG_ADDR     = 0x0001
+REG_FS       = 0x0002   # full-scale: 0=2g, 1=4g, 2=8g, 3=16g
+REG_HOLD_ODR = 0x0003   # ODR in Hz: 100,200,400,800,1600
 
 # Commands
 CMD_START     = 1
@@ -49,6 +60,14 @@ BULK_MAX_SETS = 84  # must match firmware (modbus.c)
 
 # LIS2DS12 2g: 0.061 mg/LSB
 MG_PER_LSB = 0.061
+
+FS_CHOICES = {"2g": 0, "4g": 1, "8g": 2, "16g": 3}
+FS_NAMES   = {0: "2g", 1: "4g", 2: "8g", 3: "16g"}
+
+# LIS2DS12 sensitivity per full-scale
+FS_MG_PER_LSB = {0: 0.061, 1: 0.122, 2: 0.244, 3: 0.488}
+
+VALID_ODR = [100, 200, 400, 800, 1600]
 
 # --- Raw Modbus CRC16 (for bulk reads beyond minimalmodbus 125-reg limit) ---
 
@@ -200,6 +219,12 @@ def write_register_retry(instr, reg, value, functioncode=6, retries=3):
             time.sleep(0.1)
 
 
+def configure_fs_odr(instr, fs, odr):
+    """Write FS and ODR holding registers. Must be called while stopped."""
+    write_register_retry(instr, REG_FS, fs, functioncode=6)
+    write_register_retry(instr, REG_HOLD_ODR, odr, functioncode=6)
+
+
 def test_status(instr):
     """Test 1: Read status register, verify sensor OK flags."""
     print("\n--- Test 1: Status ---")
@@ -249,7 +274,7 @@ def test_start_sampling(instr):
     return True
 
 
-def test_data_flow(instr):
+def test_data_flow(instr, odr=1600):
     """Test 3: Verify data accumulates in buffer."""
     print("\n--- Test 3: Data flow ---")
 
@@ -271,14 +296,17 @@ def test_data_flow(instr):
     total = (counter_h << 16) | counter_l
     print(f"  Total counter: {total}")
 
-    if total < 100:
-        print(f"  WARN: Counter low ({total}), expected >300 at 1600 Hz after 500 ms")
+    # Expect at least ~20% of nominal samples in 500 ms
+    expected = int(odr * 0.5)
+    threshold = max(10, expected // 5)
+    if total < threshold:
+        print(f"  WARN: Counter low ({total}), expected >{expected} at {odr} Hz after 500 ms")
 
     print(f"  PASS: Data flowing ({avail} available, {total} total)")
     return True
 
 
-def test_latest_sample(instr):
+def test_latest_sample(instr, mg_per_lsb=0.061):
     """Test 4: Read latest sample registers, verify plausible XYZ."""
     print("\n--- Test 4: Latest sample ---")
 
@@ -292,9 +320,9 @@ def test_latest_sample(instr):
         y_raw = to_signed16(regs[base + 1])
         z_raw = to_signed16(regs[base + 2])
 
-        x_mg = x_raw * MG_PER_LSB
-        y_mg = y_raw * MG_PER_LSB
-        z_mg = z_raw * MG_PER_LSB
+        x_mg = x_raw * mg_per_lsb
+        y_mg = y_raw * mg_per_lsb
+        z_mg = z_raw * mg_per_lsb
 
         if x_raw != 0 or y_raw != 0 or z_raw != 0:
             all_zero = False
@@ -308,7 +336,7 @@ def test_latest_sample(instr):
     # Check Z-axis: expect ~880-1000 mg at rest (gravity)
     for s in range(NUM_SENSORS):
         z_raw = to_signed16(regs[s * 3 + 2])
-        z_mg = abs(z_raw * MG_PER_LSB)
+        z_mg = abs(z_raw * mg_per_lsb)
         if z_mg < 500 or z_mg > 1300:
             print(f"  WARN: S{s+1} Z={z_mg:.0f} mg outside expected range (500-1300)")
 
@@ -316,7 +344,7 @@ def test_latest_sample(instr):
     return True
 
 
-def test_bulk_read(instr):
+def test_bulk_read(instr, mg_per_lsb=0.061):
     """Test 5: Bulk read 10 sample-sets (120 registers) from 0x0100."""
     print("\n--- Test 5: Bulk read ---")
 
@@ -343,9 +371,9 @@ def test_bulk_read(instr):
         base = set_idx * REGS_PER_SET
         vals = []
         for s in range(NUM_SENSORS):
-            x = to_signed16(regs[base + s * 3 + 0]) * MG_PER_LSB
-            y = to_signed16(regs[base + s * 3 + 1]) * MG_PER_LSB
-            z = to_signed16(regs[base + s * 3 + 2]) * MG_PER_LSB
+            x = to_signed16(regs[base + s * 3 + 0]) * mg_per_lsb
+            y = to_signed16(regs[base + s * 3 + 1]) * mg_per_lsb
+            z = to_signed16(regs[base + s * 3 + 2]) * mg_per_lsb
             vals.append(f"S{s+1}({x:+.0f},{y:+.0f},{z:+.0f})")
         print(f"  Set[{set_idx}]: {' '.join(vals)}")
 
@@ -389,14 +417,22 @@ def test_stop_sampling(instr):
     return True
 
 
-def cmd_test(instr):
+def cmd_test(instr, fs=0, odr=1600):
     """Run all hardware verification tests."""
+    # Stop sampling in case a previous run left it active (firmware
+    # rejects FS/ODR writes while sampling is active)
+    write_register_retry(instr, REG_CMD, CMD_STOP, functioncode=6)
+
+    print(f"\nConfig: FS={FS_NAMES[fs]}, ODR={odr} Hz")
+    configure_fs_odr(instr, fs, odr)
+
+    mg_per_lsb = FS_MG_PER_LSB[fs]
     tests = [
         test_status,
         test_start_sampling,
-        test_data_flow,
-        test_latest_sample,
-        test_bulk_read,
+        lambda i: test_data_flow(i, odr=odr),
+        lambda i: test_latest_sample(i, mg_per_lsb=mg_per_lsb),
+        lambda i: test_bulk_read(i, mg_per_lsb=mg_per_lsb),
         test_overrun,
         test_stop_sampling,
     ]
@@ -468,7 +504,7 @@ def set_low_latency(serial_port):
         return False
 
 
-def cmd_stream(instr, csv_path):
+def cmd_stream(instr, csv_path, fs=0, odr=1600):
     """Stream accelerometer data to CSV until Ctrl+C."""
     # Read status first
     status = read_register_retry(instr, REG_STATUS, functioncode=4)
@@ -478,8 +514,12 @@ def cmd_stream(instr, csv_path):
         print("ERROR: No sensors detected")
         return False
 
-    odr = read_register_retry(instr, REG_ODR, functioncode=4)
-    print(f"Sensors: {ok_count}/{NUM_SENSORS} OK, ODR: {odr} Hz")
+    # Stop sampling in case a previous run left it active (firmware
+    # rejects FS/ODR writes while sampling is active)
+    write_register_retry(instr, REG_CMD, CMD_STOP, functioncode=6)
+
+    print(f"Config: FS={FS_NAMES[fs]}, ODR={odr} Hz")
+    configure_fs_odr(instr, fs, odr)
 
     # Reduce USB-serial latency (default 16 ms cripples throughput)
     if not set_low_latency(instr.serial):
@@ -492,6 +532,10 @@ def cmd_stream(instr, csv_path):
     time.sleep(0.05)
     write_register_retry(instr, REG_CMD, CMD_START, functioncode=6)
     time.sleep(0.1)
+
+    # Read ODR after START (firmware updates odr_reg in START handler)
+    odr_readback = read_register_retry(instr, REG_ODR, functioncode=4)
+    print(f"Sensors: {ok_count}/{NUM_SENSORS} OK, ODR: {odr_readback} Hz")
 
     # Verify sampling started
     status = read_register_retry(instr, REG_STATUS, functioncode=4)
@@ -514,7 +558,8 @@ def cmd_stream(instr, csv_path):
     try:
         with open(csv_path, "w", newline="") as f:
             writer = csv.writer(f)
-            f.write(f"# LIS2DS12 2g mode, {MG_PER_LSB} mg/LSB, raw int16 values\n")
+            mg = FS_MG_PER_LSB[fs]
+            f.write(f"# LIS2DS12 {FS_NAMES[fs]} mode, {mg} mg/LSB, raw int16 values\n")
             writer.writerow([
                 "sample", "time",
                 "s1_x", "s1_y", "s1_z",
@@ -582,33 +627,36 @@ def cmd_stream(instr, csv_path):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <serial_port> [stream [file.csv]]")
-        print(f"  {sys.argv[0]} /dev/ttyUSB0                # run tests")
-        print(f"  {sys.argv[0]} /dev/ttyUSB0 stream          # stream to CSV")
-        print(f"  {sys.argv[0]} /dev/ttyUSB0 stream data.csv # stream to named CSV")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Modbus RTU test for accelerometer board")
+    parser.add_argument("port", help="Serial port (e.g. /dev/ttyUSB0)")
+    parser.add_argument("command", nargs="?", default="test",
+                        choices=["test", "stream"], help="Command (default: test)")
+    parser.add_argument("csv", nargs="?", default=None,
+                        help="CSV output path (stream mode only)")
+    parser.add_argument("--fs", choices=["2g", "4g", "8g", "16g"], default="2g",
+                        help="Full-scale range (default: 2g)")
+    parser.add_argument("--odr", type=int,
+                        choices=[100, 200, 400, 800, 1600],
+                        default=1600, help="Output data rate in Hz (default: 1600)")
+    args = parser.parse_args()
 
-    port = sys.argv[1]
-    command = sys.argv[2] if len(sys.argv) > 2 else "test"
+    fs = FS_CHOICES[args.fs]
 
-    print(f"Connecting to {port} at 921600 baud")
-    instr = connect(port)
+    print(f"Connecting to {args.port} at 921600 baud")
+    instr = connect(args.port)
 
-    if command == "stream":
+    if args.command == "stream":
         csv_path = (
-            sys.argv[3]
-            if len(sys.argv) > 3
+            args.csv
+            if args.csv
             else f"accel_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         )
-        ok = cmd_stream(instr, csv_path)
-        sys.exit(0 if ok else 1)
-    elif command == "test":
-        ok = cmd_test(instr)
+        ok = cmd_stream(instr, csv_path, fs=fs, odr=args.odr)
         sys.exit(0 if ok else 1)
     else:
-        print(f"Unknown command: {command}")
-        sys.exit(1)
+        ok = cmd_test(instr, fs=fs, odr=args.odr)
+        sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":
