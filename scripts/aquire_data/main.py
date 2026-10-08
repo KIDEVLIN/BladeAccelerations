@@ -36,6 +36,14 @@ rig rather than being re-armed each angle. The run-averaged conditions
 (density, viscosity, freestream velocity, Reynolds number, etc.) are
 written once at the end to Data/wind_tunnel/tunnel_conditions_summary.csv.
 
+Accelerometer mode (full-scale range + output data rate) is chosen per run:
+    python main.py                      # ACCEL_FS / ACCEL_ODR_HZ defaults (2g, 1600 Hz)
+    python main.py --fs 8g --odr 800
+The mode is recorded in run_metadata.json and each accel CSV header, and every
+angle's capture is checked for samples pinned at full scale (see
+ACCEL_SAT_WARN_FRACTION) -- a warning means the run should be repeated in a
+higher range.
+
 Requirements:
     pip install minimalmodbus pyserial pandas openpyxl nidaqmx numpy matplotlib
 """
@@ -45,11 +53,13 @@ import os
 import threading
 import time
 from pathlib import Path
+import argparse
 import json
 import math
 from dataclasses import asdict
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
 from motor import Motor
@@ -81,6 +91,19 @@ AIRFOIL_CHORD_M = 0.02             # Reynolds number length scale -- set per exp
 
 ANGLES_FILE = "scripts/aquire_data/test_angles.xlsx"     # .xlsx, .csv, or .txt (one angle per line / row)
 OUTPUT_DIR = "Data/run3"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
+
+# Accelerometer mode for this run. Written to the PCB before every capture and
+# recorded in run_metadata.json + each accel CSV header. Can be overridden from
+# the command line:  python main.py --fs 8g --odr 800
+ACCEL_FS = "2g"               # full-scale range: "2g", "4g", "8g" or "16g"
+ACCEL_ODR_HZ = 1600           # output data rate: 100, 200, 400, 800 or 1600
+
+# Saturation check: a sample counts as "at the maximum" when a component's raw
+# int16 value is within ACCEL_SAT_LEVEL of full scale. If at least
+# ACCEL_SAT_WARN_FRACTION of the samples in one angle's capture are at the
+# maximum in any single component (s1_x ... s4_z), a warning is printed.
+ACCEL_SAT_LEVEL = 0.995
+ACCEL_SAT_WARN_FRACTION = 0.01
 
 SAMPLE_DURATION_S = 2         # how long to capture accel + load data at each angle
 SETTLE_TIME_S = 2             # pause after move, before capture starts
@@ -126,11 +149,92 @@ def load_angles(path):
 
 
 # --------------------------------------------------
+# Accelerometer mode + saturation check
+# --------------------------------------------------
+
+ACCEL_COMPONENTS = [f"s{s}_{axis}" for s in range(1, pcb.NUM_SENSORS + 1) for axis in "xyz"]
+FS_ORDER = ["2g", "4g", "8g", "16g"]
+INT16_MAX = 32767
+
+
+def check_accel_mode(fs, odr_hz):
+    if fs not in pcb.FS_CHOICES:
+        raise ValueError(f"Unknown accelerometer range {fs!r}; choose from {list(pcb.FS_CHOICES)}")
+    if odr_hz not in pcb.VALID_ODR:
+        raise ValueError(f"Unsupported ODR {odr_hz}; choose from {pcb.VALID_ODR}")
+
+
+def analyze_saturation(rows, fs):
+    """Checks one capture for samples pinned at the sensor's maximum.
+
+    rows: iterable of the 12 raw int16 columns (s1_x ... s4_z), one row per
+    sample. A sample is "at the maximum" when |raw| >= ACCEL_SAT_LEVEL * 32767
+    (the output register is a full-range int16 at every FS setting, so this is
+    the clipping point regardless of mode).
+
+    Returns {"fs", "peak_g", "fractions", "flagged"} where "fractions" maps
+    each component that hit the maximum at least once to its share of samples,
+    and "flagged" is the subset at or above ACCEL_SAT_WARN_FRACTION.
+    """
+    mg_per_lsb = pcb.FS_MG_PER_LSB[pcb.FS_CHOICES[fs]]
+    arr = np.asarray(rows, dtype=float)
+    if arr.size == 0:
+        return {"fs": fs, "peak_g": 0.0, "fractions": {}, "flagged": {}}
+    at_max = np.abs(arr) >= ACCEL_SAT_LEVEL * INT16_MAX
+    frac = at_max.mean(axis=0)
+    fractions = {c: float(f) for c, f in zip(ACCEL_COMPONENTS, frac) if f > 0}
+    flagged = {c: f for c, f in fractions.items() if f >= ACCEL_SAT_WARN_FRACTION}
+    return {
+        "fs": fs,
+        "peak_g": float(np.abs(arr).max() * mg_per_lsb / 1000.0),
+        "fractions": fractions,
+        "flagged": flagged,
+    }
+
+
+def next_fs_up(fs):
+    i = FS_ORDER.index(fs)
+    return FS_ORDER[i + 1] if i + 1 < len(FS_ORDER) else None
+
+
+def format_saturation(flagged):
+    return ", ".join(f"{c} ({100 * f:.1f}%)" for c, f in flagged.items())
+
+
+def summarize_saturation(saturated_angles, n_angles, fs):
+    """Run-level saturation summary: prints it (only if something saturated)
+    and returns a JSON-friendly dict for run_metadata.json."""
+    worst = {}
+    for _, flagged in saturated_angles:
+        for comp, frac in flagged.items():
+            worst[comp] = max(worst.get(comp, 0.0), frac)
+    higher = next_fs_up(fs)
+    summary = {
+        "fs": fs,
+        "n_angles_saturated": len(saturated_angles),
+        "n_angles": n_angles,
+        "angles_saturated": [a for a, _ in saturated_angles],
+        "worst_fraction_by_component": worst,
+        "suggested_fs": higher if saturated_angles else None,
+    }
+    if saturated_angles:
+        print(f"\nWARN: accelerometer saturated at {len(saturated_angles)}/{n_angles} angles "
+              f"in {fs} mode (worst: {format_saturation(worst)}).")
+        if higher:
+            print(f"      Clipped data underestimates the true acceleration -- "
+                  f"re-collect this run in {higher} mode or higher (--fs {higher}).")
+        else:
+            print("      Already at the maximum range (16g); the signal exceeds the sensor's range.")
+    return summary
+
+
+# --------------------------------------------------
 # Accelerometer capture (bounded by duration, not Ctrl+C)
 # --------------------------------------------------
 
 
-def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None, on_poll=None):
+def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None, on_poll=None,
+                               fs=ACCEL_FS, odr_hz=ACCEL_ODR_HZ):
     """Capture accelerometer FIFO data for duration_s seconds and write it
     to csv_path. Mirrors test_modbus.cmd_stream's raw-serial loop, but
     stops after a fixed duration instead of waiting for KeyboardInterrupt.
@@ -142,17 +246,30 @@ def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None, on
     thread alongside a load-cell thread (sharing the same barrier/event)
     releases both at the same instant for a synchronized start.
 
-    Returns (total_samples, t_start, accel_variance) where t_start is the
-    time.perf_counter() value at which the capture loop actually began
-    (also written into the CSV header for reference), and accel_variance
-    is the variance of the acceleration magnitude over the capture
-    window (see live_varience_plot.accel_magnitude_variance), or 0.0 if
-    no samples were captured.
+    fs / odr_hz: accelerometer full-scale range ("2g".."16g") and output
+    data rate. Written to the PCB before sampling is armed (the firmware
+    rejects FS/ODR writes while sampling is active, so sampling is stopped
+    first). Raw counts are converted to mg with the matching sensitivity.
+
+    Returns (total_samples, t_start, accel_variance, saturation) where
+    t_start is the time.perf_counter() value at which the capture loop
+    actually began (also written into the CSV header for reference),
+    accel_variance is the variance of the acceleration magnitude over the
+    capture window (see live_varience_plot.accel_magnitude_variance), or 0.0
+    if no samples were captured, and saturation is the dict from
+    analyze_saturation().
     """
     ser = instr.serial
     addr = instr.address
 
-    # Arm sampling
+    check_accel_mode(fs, odr_hz)
+    fs_code = pcb.FS_CHOICES[fs]
+    mg_per_lsb = pcb.FS_MG_PER_LSB[fs_code]
+
+    # Configure the mode (sampling must be stopped), then arm sampling
+    pcb.write_register_retry(instr, pcb.REG_CMD, pcb.CMD_STOP, functioncode=6)
+    time.sleep(0.05)
+    pcb.configure_fs_odr(instr, fs_code, odr_hz)
     pcb.write_register_retry(instr, pcb.REG_CMD, pcb.CMD_RESET_BUF, functioncode=6)
     time.sleep(0.05)
     pcb.write_register_retry(instr, pcb.REG_CMD, pcb.CMD_START, functioncode=6)
@@ -163,6 +280,8 @@ def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None, on
         raise RuntimeError("Accelerometer sampling did not start")
 
     odr = pcb.read_register_retry(instr, pcb.REG_ODR, functioncode=4)
+    if odr != odr_hz:
+        print(f"  WARN: requested ODR {odr_hz} Hz but the PCB reports {odr} Hz")
 
     if start_event is not None:
         start_event.wait()
@@ -173,7 +292,7 @@ def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None, on
 
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
-        f.write(f"# LIS2DS12 2g mode, {pcb.MG_PER_LSB} mg/LSB, raw int16, "
+        f.write(f"# LIS2DS12 {fs} mode, {mg_per_lsb} mg/LSB, raw int16, "
                  f"ODR={odr} Hz, t_start_perf_counter={t_start:.6f}\n")
         writer.writerow(
             ["sample", "time",
@@ -208,10 +327,12 @@ def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None, on
 
     elapsed = time.perf_counter() - t_start
     rate = total_samples / elapsed if elapsed > 0 else 0
-    print(f"  Accel: captured {total_samples} samples in {elapsed:.2f}s ({rate:.0f}/s, ODR={odr} Hz)")
+    print(f"  Accel: captured {total_samples} samples in {elapsed:.2f}s "
+          f"({rate:.0f}/s, {fs}, ODR={odr} Hz)")
 
-    accel_var = accel_magnitude_variance(all_rows, pcb.MG_PER_LSB) if all_rows else 0.0
-    return total_samples, t_start, accel_var
+    accel_var = accel_magnitude_variance(all_rows, mg_per_lsb) if all_rows else 0.0
+    saturation = analyze_saturation(all_rows, fs)
+    return total_samples, t_start, accel_var, saturation
 
 
 # --------------------------------------------------
@@ -219,7 +340,8 @@ def collect_accel_for_duration(instr, duration_s, csv_path, start_event=None, on
 # --------------------------------------------------
 
 
-def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path=None, on_poll=None):
+def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path=None, on_poll=None,
+                         fs=ACCEL_FS, odr_hz=ACCEL_ODR_HZ):
     """Runs collect_accel_for_duration and (if load_csv_path is given)
     collect_load_for_duration in parallel threads, released together via
     a shared threading.Barrier sized to the number of threads actually
@@ -235,6 +357,7 @@ def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path=None, 
         {
           "accel_samples": int, "accel_t_start": float,
           "accel_variance": float,
+          "accel_saturation": dict,   # from analyze_saturation()
           # present only when load_csv_path was given:
           "load_samples": int,  "load_t_start": float,
         }
@@ -249,13 +372,15 @@ def collect_synchronized(instr, duration_s, accel_csv_path, load_csv_path=None, 
 
     def _run_accel():
         try:
-            n, t0, accel_var = collect_accel_for_duration(
-                instr, duration_s, accel_csv_path, start_event=start_gate
+            n, t0, accel_var, saturation = collect_accel_for_duration(
+                instr, duration_s, accel_csv_path, start_event=start_gate,
+                fs=fs, odr_hz=odr_hz,
                 # NOTE: no on_poll here -- this runs on a worker thread,
                 # and matplotlib calls are not thread-safe.
             )
             result["accel_samples"], result["accel_t_start"] = n, t0
             result["accel_variance"] = accel_var
+            result["accel_saturation"] = saturation
         except Exception as e:
             errors.append(("accel", e))
             start_gate.abort()
@@ -343,9 +468,11 @@ def write_run_metadata(path, meta):
 # --------------------------------------------------
 
 
-def main():
+def main(fs=ACCEL_FS, odr_hz=ACCEL_ODR_HZ):
+    check_accel_mode(fs, odr_hz)   # fail fast, before any hardware is touched
     angles = load_angles(ANGLES_FILE)
     print(f"Loaded {len(angles)} target angles: {angles}")
+    print(f"Accelerometer mode: {fs}, ODR={odr_hz} Hz")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -372,6 +499,7 @@ def main():
         "accel_csv_path", "load_csv_path",
         "accel_t_start", "load_t_start", "sync_offset_ms",
         "accel_variance", "load_variance",
+        "accel_fs", "accel_peak_g", "accel_saturated",
     ]
 
     metadata = {
@@ -385,6 +513,12 @@ def main():
         "settle_time_s": SETTLE_TIME_S,
         "counts_per_deg": motor.counts_per_deg,
         "loadcell_sample_rate_hz": LOADCELL_SAMPLE_RATE_HZ,
+        "accel_fs": fs,
+        "accel_odr_hz": odr_hz,
+        "accel_mg_per_lsb": pcb.FS_MG_PER_LSB[pcb.FS_CHOICES[fs]],
+        "accel_sat_level": ACCEL_SAT_LEVEL,
+        "accel_sat_warn_fraction": ACCEL_SAT_WARN_FRACTION,
+        "accel_saturation_summary": None,
         "run_load_cell": RUN_LOAD_CELL,
         "run_tunnel_conditions": RUN_TUNNEL_CONDITIONS,
         "angles_requested": angles,
@@ -399,6 +533,7 @@ def main():
     tunnel_collector = None
     tunnel_started = False
     tunnel_summary = None
+    saturated_angles = []   # [(requested_angle, {component: fraction}), ...]
     completed = False
 
     motor.start()
@@ -446,9 +581,18 @@ def main():
             sync_result = collect_synchronized(
                 instr, SAMPLE_DURATION_S, csv_path,
                 load_csv_path=load_csv_path, on_poll=plotter.pump,
+                fs=fs, odr_hz=odr_hz,
             )
             accel_var = sync_result["accel_variance"]
             load_var = sync_result.get("load_variance")
+
+            # ---- Saturation check: is the accelerometer pinned at full scale? ----
+            sat = sync_result["accel_saturation"]
+            if sat["flagged"]:
+                saturated_angles.append((angle, sat["flagged"]))
+                print(f"  WARN: accelerometer saturated in {fs} mode -- "
+                      f"{format_saturation(sat['flagged'])} of samples at the maximum "
+                      f"(peak {sat['peak_g']:.2f} g)")
 
             # ---- Motor angle comes from the ENCODER, never the commanded angle ----
             # Preferred: mean encoder angle over the capture window. Fallback: the
@@ -484,6 +628,9 @@ def main():
                     if "load_t_start" in sync_result else None),
                 "accel_variance": accel_var,
                 "load_variance": load_var,
+                "accel_fs": fs,
+                "accel_peak_g": sat["peak_g"],
+                "accel_saturated": format_saturation(sat["flagged"]),   # "" when none
             }
 
             if motor_angle is not None:
@@ -525,6 +672,8 @@ def main():
             wtc.save_summary(tunnel_summary, output_dir=OUTPUT_DIR)   # per-run, not Data/wind_tunnel
             metadata["tunnel_conditions"] = tunnel_summary
 
+        metadata["accel_saturation_summary"] = summarize_saturation(
+            saturated_angles, len(metadata["angles"]), fs)
         metadata["status"] = "complete" if completed else "aborted"
         metadata["end_time"] = datetime.now().isoformat(timespec="seconds")
         write_run_metadata(metadata_path, metadata)
@@ -541,4 +690,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Angle-sweep data acquisition")
+    parser.add_argument("--fs", choices=list(pcb.FS_CHOICES), default=ACCEL_FS,
+                        help=f"accelerometer full-scale range (default: {ACCEL_FS})")
+    parser.add_argument("--odr", type=int, choices=pcb.VALID_ODR, default=ACCEL_ODR_HZ,
+                        help=f"accelerometer output data rate in Hz (default: {ACCEL_ODR_HZ})")
+    cli = parser.parse_args()
+    main(fs=cli.fs, odr_hz=cli.odr)
