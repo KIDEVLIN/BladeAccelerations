@@ -27,14 +27,14 @@ time series; it appears only in the title.
 import numpy as np
 import matplotlib.pyplot as plt
 
-from variance_analysis import ACCEL_COLS, LOAD_FORCE_COLS, MG_PER_LSB, NUM_SENSORS
+from variance_analysis import ACCEL_COLS, LOAD_FORCE_COLS, NUM_SENSORS, accel_mg_per_lsb
 
 LOAD_MOMENT_COLS = ["Mx", "My", "Mz"]
 MG_PER_G = 1000.0
 
 
 def _accel_magnitudes_g(accel_df):
-    rows = accel_df[ACCEL_COLS].to_numpy(dtype=float) * MG_PER_LSB / MG_PER_G
+    rows = accel_df[ACCEL_COLS].to_numpy(dtype=float) * accel_mg_per_lsb(accel_df) / MG_PER_G
     rows = rows.reshape(-1, NUM_SENSORS, 3)
     return np.linalg.norm(rows, axis=2)  # (N, sensor), in g
 

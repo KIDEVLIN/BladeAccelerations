@@ -46,7 +46,7 @@ from utils.plot_timeseries import (
 )
 from variance_analysis import (
     accel_per_sensor_variance, accel_mean_variance, load_variance,
-    pick_extreme_angles, ACCEL_COLS,
+    pick_extreme_angles, ACCEL_COLS, accel_mg_per_lsb,
 )
 from plot_variance_sweep import plot_variance_sweep
 from utils import coordinate_transforms as ct
@@ -165,7 +165,7 @@ def accel_components_g(accel_df, sensor):
     """(N, 3) array of [a_x, a_y, a_z] in g for one sensor (1-based, S1..S4).
     Same layout idea as _accel_magnitudes_g, which returns (N, sensor)."""
     cols = [f"s{sensor}_{axis}" for axis in "xyz"]
-    return accel_df[cols].to_numpy(dtype=float) * pcb.MG_PER_LSB / 1000.0
+    return accel_df[cols].to_numpy(dtype=float) * accel_mg_per_lsb(accel_df) / 1000.0
 
 
 SENSOR = 4          # which sensor to look at
@@ -212,7 +212,7 @@ fig.tight_layout()
 def accel_components_g(accel_df, sensor):
     """sensor is 1-based (S1..S4), matching the plot labels."""
     cols = [f"s{sensor}_{axis}" for axis in "xyz"]
-    return accel_df[cols].to_numpy(dtype=float) * pcb.MG_PER_LSB / 1000.0
+    return accel_df[cols].to_numpy(dtype=float) * accel_mg_per_lsb(accel_df) / 1000.0
 
 
 SENSOR = 4        # which sensor to look at (1-4)
