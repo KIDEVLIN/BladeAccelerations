@@ -76,7 +76,15 @@ def _frame_angles(captures, motor_angles, sweep_angle_deg, mounting_angle_deg):
     return None, None
 
 
-def plot_variance_sweep(captures, out_path, sweep_angle_deg=None, mounting_angle_deg=None):
+def plot_variance_sweep(captures, out_path, sweep_angle_deg=None, mounting_angle_deg=None,
+                        a_c_g=None):
+    """a_c_g: optional characteristic acceleration (g, see normalization.py).
+    When given, accel variance is plotted as a*^2 = Var / a_c^2 (dimensionless)
+    instead of g^2. Load-cell panels are unchanged."""
+    accel_scale = MG2_TO_G2 / a_c_g ** 2 if a_c_g is not None else MG2_TO_G2
+    var_label = "Variance, a*^2" if a_c_g is not None else "Variance (g^2)"
+    sweep_label = ("Accel magnitude variance, a*^2" if a_c_g is not None
+                   else "Accel magnitude variance (g^2)")
     motor_angles = _motor_angles(captures)
     inclinations, aoas = _frame_angles(captures, motor_angles, sweep_angle_deg, mounting_angle_deg)
     has_frame_angles = inclinations is not None
@@ -94,14 +102,14 @@ def plot_variance_sweep(captures, out_path, sweep_angle_deg=None, mounting_angle
     row = 0
     if has_frame_angles:
         ax_map_accel = axes[row][0]
-        map_accel_var = np.array([v[MAP_SENSOR] for v in per_sensor_var]) * MG2_TO_G2
+        map_accel_var = np.array([v[MAP_SENSOR] for v in per_sensor_var]) * accel_scale
         sc = ax_map_accel.scatter(inclinations, aoas, c=map_accel_var, cmap="viridis")
         ax_map_accel.set_xlim(-45, 45)
         ax_map_accel.set_ylim(-180, 180)
         ax_map_accel.set_xlabel("Inclination angle (deg)")
         ax_map_accel.set_ylabel("Angle of attack / pitch (deg)")
         ax_map_accel.set_title(f"Accel magnitude variance (S{MAP_SENSOR})")
-        fig.colorbar(sc, ax=ax_map_accel, label="Variance (g^2)")
+        fig.colorbar(sc, ax=ax_map_accel, label=var_label)
 
         if has_load:
             ax_map_load = axes[row][1]
@@ -117,10 +125,10 @@ def plot_variance_sweep(captures, out_path, sweep_angle_deg=None, mounting_angle
 
     ax_sweep_accel = axes[row][0]
     for s in range(4):
-        vals = np.array([v[s + 1] for v in per_sensor_var])[order] * MG2_TO_G2
+        vals = np.array([v[s + 1] for v in per_sensor_var])[order] * accel_scale
         ax_sweep_accel.plot(motor_angles[order], vals, "o-", color=_ACCEL_COLORS[s], label=f"S{s + 1}")
     ax_sweep_accel.set_xlabel("Motor angle (deg)")
-    ax_sweep_accel.set_ylabel("Accel magnitude variance (g^2)")
+    ax_sweep_accel.set_ylabel(sweep_label)
     ax_sweep_accel.set_title("Accel variance vs motor angle -- all 4 sensors")
     ax_sweep_accel.legend(fontsize=8)
 
