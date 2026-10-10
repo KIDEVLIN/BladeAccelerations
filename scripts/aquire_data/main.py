@@ -87,7 +87,7 @@ ZERO_DURATION_S = 30          # length of the fan-off zero measurement
 ZERO_WARN_V = 10            # warn if a measured offset magnitude exceeds this (V)
 
 RUN_TUNNEL_CONDITIONS = True       # False = skip wind tunnel conditions entirely
-AIRFOIL_CHORD_M = 0.02             # Reynolds number length scale -- set per experiment
+AIRFOIL_CHORD_M = 0.0138             # Reynolds number length scale -- set per experiment
 
 # Blade properties used to nondimensionalise the accel variance in post-processing
 # (a_c = 1/2 rho U^2 c_avg b / m, see normalization.py). Recorded in run_metadata.json;
