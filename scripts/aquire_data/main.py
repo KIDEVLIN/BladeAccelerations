@@ -89,6 +89,13 @@ ZERO_WARN_V = 10            # warn if a measured offset magnitude exceeds this (
 RUN_TUNNEL_CONDITIONS = True       # False = skip wind tunnel conditions entirely
 AIRFOIL_CHORD_M = 0.02             # Reynolds number length scale -- set per experiment
 
+# Blade properties used to nondimensionalise the accel variance in post-processing
+# (a_c = 1/2 rho U^2 c_avg b / m, see normalization.py). Recorded in run_metadata.json;
+# leave None if unknown and pass them to postprocessing_pipeline.py instead.
+BLADE_CHORD_AVG_M = None           # average chord along the blade (m)
+BLADE_SPAN_M = None                # blade span (m)
+BLADE_MASS_KG = None               # blade mass (kg)
+
 ANGLES_FILE = "scripts/aquire_data/test_angles.xlsx"     # .xlsx, .csv, or .txt (one angle per line / row)
 OUTPUT_DIR = "Data/run3"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
 
@@ -509,6 +516,9 @@ def main(fs=ACCEL_FS, odr_hz=ACCEL_ODR_HZ):
         "sweep_angle_deg": SWEEP_ANGLE_DEG,
         "mounting_angle_deg": MOUNTING_ANGLE_DEG,
         "airfoil_chord_m": AIRFOIL_CHORD_M,
+        "blade_chord_avg_m": BLADE_CHORD_AVG_M,
+        "blade_span_m": BLADE_SPAN_M,
+        "blade_mass_kg": BLADE_MASS_KG,
         "sample_duration_s": SAMPLE_DURATION_S,
         "settle_time_s": SETTLE_TIME_S,
         "counts_per_deg": motor.counts_per_deg,
