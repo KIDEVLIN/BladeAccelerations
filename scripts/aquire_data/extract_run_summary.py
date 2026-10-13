@@ -78,7 +78,7 @@ DAQ_RANGE_V = 10.0
 DAQ_CLIP_LEVEL = 0.99
 
 # Blade constants (model scale, 318:1)
-DEFAULTS = dict(chord_avg_m=0.0138, span_m=0.28, mass_kg=0.0267, B_e=3.47e8)
+DEFAULTS = dict(chord_avg_m=0.0138, span_m=0.28, mass_kg=0.0267, B_e=0.2475)
 
 NAME_RE = re.compile(r"^(?P<blade>.+?)_(?P<psi>\d+)psi_(?P<fs>\d+)fs(?:_v(?P<v>\d+))?$")
 
@@ -372,7 +372,7 @@ def main():
     ap.add_argument("--span-m", type=float, default=DEFAULTS["span_m"])
     ap.add_argument("--mass-kg", type=float, default=DEFAULTS["mass_kg"])
     ap.add_argument("--B-e", type=float, default=DEFAULTS["B_e"],
-                    help="average edgewise bending stiffness for Ca_e (default 3.47e8)")
+                    help="average edgewise bending stiffness for Ca_e (default 0.2475)")
     args = ap.parse_args()
 
     out_root = Path(args.out)

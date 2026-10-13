@@ -11,11 +11,15 @@ Usage (from scripts/aquire_data):
     python angle_metrics.py Production_summaries/master_angles.csv --k 10 --decimate 10
     python angle_metrics.py Production_summaries/master_angles.csv --baseline 0.001   # fixed floor
     python angle_metrics.py Production_summaries/master_angles.csv --baseline-file baselines.csv
+    python angle_metrics.py Production_summaries/master_angles.csv --sensor S4
 
-Output: master_metrics.csv next to master_angles.csv (one row per run).
+Output: master_metrics.csv next to master_angles.csv (one row per run). With --sensor S4 the output is
+master_metrics_S4.csv (the form plot_design_space.py --sensor S4 looks for).
 
 Per-angle quantity: nvar_max_sensor = worst-sensor normalized acceleration variance
-(Var(|a|)/a_c^2). The curve of that quantity vs motor angle is treated as piecewise linear
+(Var(|a|)/a_c^2), or with --sensor S1..S4 that one accelerometer's nvar_s1..nvar_s4. All metrics below,
+including the baseline, are then computed from that sensor alone, and the clipped-angle count refers
+to that sensor. The curve of that quantity vs motor angle is treated as piecewise linear
 between measured angles. Segments longer than --max-gap (default 20 deg) are treated as NOT
 measured, so a targeted sweep is never interpolated across a hole.
 
@@ -50,6 +54,7 @@ Requires: numpy pandas
 """
 
 import argparse
+import re
 from pathlib import Path
 
 import numpy as np
@@ -62,11 +67,18 @@ PEAK_GAP_WARN_DEG = 10.0
 # Core numerics
 # --------------------------------------------------
 
-def prep(g):
+def clipped_sensors(s):
+    """Sensor numbers named in an accel_clip_components string such as 's2_x=3.0%;s2_z=1.2%'."""
+    if not isinstance(s, str) or not s:
+        return set()
+    return {int(x) for x in re.findall(r"s(\d)_", s)}
+
+
+def prep(g, col="nvar_max_sensor"):
     """Sorted angles and values; repeated angles are averaged."""
-    g = g.dropna(subset=["motor_angle_deg", "nvar_max_sensor"])
+    g = g.dropna(subset=["motor_angle_deg", col])
     d = pd.DataFrame({"t": g["motor_angle_deg"].round(2).to_numpy(float),
-                      "f": g["nvar_max_sensor"].to_numpy(float)})
+                      "f": g[col].to_numpy(float)})
     d = d.groupby("t", as_index=False)["f"].mean().sort_values("t")
     return d["t"].to_numpy(), d["f"].to_numpy()
 
@@ -156,7 +168,7 @@ def curve_metrics(t, f, b, thr, max_gap):
 # --------------------------------------------------
 
 def run_metrics(run, g, args):
-    t, f = prep(g)
+    t, f = prep(g, args.value_col)
     row = dict(run_name=run, n_angles=len(t))
     if len(t) < 2:
         row["note"] = "fewer than 2 usable angles"
@@ -203,9 +215,14 @@ def run_metrics(run, g, args):
                peak_at_edge=bool(ip in (0, len(t) - 1)), peak_nbr_gap_deg=float(pg),
                peak_maybe_unresolved=bool(pg >= PEAK_GAP_WARN_DEG))
 
-    for col, name in (("accel_clipped", "n_clipped_angles"), ("accel_touched_max", "n_touched_max_angles")):
-        if col in g.columns:
-            row[name] = int(g[col].astype(bool).sum())
+    if args.sensor_id:                     # clipping of the chosen sensor only
+        if "accel_clip_components" in g.columns:
+            row["n_clipped_angles"] = int(sum(args.sensor_id in clipped_sensors(c)
+                                              for c in g["accel_clip_components"]))
+    else:
+        for col, name in (("accel_clipped", "n_clipped_angles"), ("accel_touched_max", "n_touched_max_angles")):
+            if col in g.columns:
+                row[name] = int(g[col].astype(bool).sum())
 
     # sampling-sensitivity test on a coarser grid
     if args.decimate:
@@ -230,7 +247,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("master_angles", help="path to master_angles.csv")
-    ap.add_argument("--out", help="output csv (default: master_metrics.csv next to the input)")
+    ap.add_argument("--out", help="output csv (default: master_metrics.csv, or master_metrics_S4.csv with --sensor S4)")
+    ap.add_argument("--sensor", help="use one accelerometer (S1..S4) instead of the worst of the four")
     ap.add_argument("--baseline", default="median",
                     help="median (default), p25, or a number for a fixed quiet level")
     ap.add_argument("--baseline-file",
@@ -248,6 +266,14 @@ def main():
     if args.baseline not in ("median", "p25"):
         args.baseline = float(args.baseline)
 
+    args.sensor_id, args.value_col = None, "nvar_max_sensor"
+    if args.sensor:
+        m = re.fullmatch(r"[sS]?([1-4])", args.sensor.strip())
+        if not m:
+            raise SystemExit(f"--sensor {args.sensor!r}: use S1 to S4")
+        args.sensor_id = int(m[1])
+        args.value_col = f"nvar_s{args.sensor_id}"
+
     args.baseline_map = {}
     if args.baseline_file:
         bf = pd.read_csv(args.baseline_file)
@@ -255,13 +281,14 @@ def main():
 
     src = Path(args.master_angles)
     df = pd.read_csv(src)
-    need = {"run_name", "motor_angle_deg", "nvar_max_sensor"}
+    need = {"run_name", "motor_angle_deg", args.value_col}
     if not need <= set(df.columns):
         raise SystemExit(f"{src} is missing columns: {sorted(need - set(df.columns))}")
 
     rows = [run_metrics(run, g, args) for run, g in df.groupby("run_name", sort=True)]
     out = pd.DataFrame(rows)
-    out_path = Path(args.out) if args.out else src.parent / "master_metrics.csv"
+    default_name = f"master_metrics_S{args.sensor_id}.csv" if args.sensor_id else "master_metrics.csv"
+    out_path = Path(args.out) if args.out else src.parent / default_name
     out.to_csv(out_path, index=False)
 
     show = ["run_name", "coverage_deg", "nvar_max", "nvar_max_angle_deg", "nvar_p90_weighted",

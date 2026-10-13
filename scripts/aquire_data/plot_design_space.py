@@ -7,7 +7,9 @@ edgewise Cauchy number plot, colored by a vibration metric.
 
 Inputs (written by the earlier pipeline stages, no raw data is read):
     master_runs.csv      from extract_run_summary.py
-    master_metrics.csv   from angle_metrics.py (needed for the excess, width and weighted-p90 options)
+    master_angles.csv    from extract_run_summary.py (only needed for --sensor)
+    master_metrics.csv   from angle_metrics.py (needed for the excess, width and weighted-p90 options;
+                         with --sensor S4 it is master_metrics_S4.csv from angle_metrics.py --sensor S4)
 
 Usage (from scripts/aquire_data):
     python plot_design_space.py Production_summaries/master_runs.csv
@@ -15,6 +17,8 @@ Usage (from scripts/aquire_data):
     python plot_design_space.py Production_summaries/master_runs.csv --panels p90 --p90 weighted
     python plot_design_space.py Production_summaries/master_runs.csv --panels excess
     python plot_design_space.py Production_summaries/master_runs.csv --panels p90,excess,width --no-labels
+    python plot_design_space.py Production_summaries/master_runs.csv --sensor S4              # S4 only
+    python plot_design_space.py Production_summaries/master_runs.csv --sensor S4 --panels p90,excess
 
 Options
     --panels LIST       comma-separated metrics, one panel each (default max,p90; "both" = max,p90)
@@ -34,13 +38,19 @@ Options
     --separate-cbars    give max and p90 their own colorbars instead of one shared colorbar
     --full-only         plot only runs with a full sweep (coverage of at least 95% of 360 deg);
                         partial sweeps are left out of the figure and the table
-    --metrics PATH      master_metrics.csv (default: next to master_runs.csv)
+    --sensor S1..S4     use one accelerometer instead of the worst of the four. The maximum and the
+                        90th percentile (count) are recomputed from that sensor's per-angle values in
+                        master_angles.csv, and the clipped (square) marker means THAT sensor clipped.
+                        The weighted 90th percentile, excess and width panels need
+                        master_metrics_S4.csv: run  angle_metrics.py master_angles.csv --sensor S4  first.
+    --angles PATH       master_angles.csv (default: next to master_runs.csv)
+    --metrics PATH      master_metrics.csv (default: next to master_runs.csv; master_metrics_S4.csv with --sensor S4)
     --no-labels         hide the dataset names (e.g. 390/300)
     --out DIR, --dpi N
 
 Outputs (in --out, default <master_runs folder>/figures):
-    design_space[_<panels>][_weighted][_linear].png
-    design_space_table.csv    the numbers behind the plot
+    design_space[_<panels>][_weighted][_S4][_fullonly][_linear].png
+    design_space_table[_S4].csv    the numbers behind the plot
 
 Encoding
     color  = the metric of each panel
@@ -53,6 +63,7 @@ Requires: numpy pandas matplotlib
 """
 
 import argparse
+import re
 from pathlib import Path
 
 import numpy as np
@@ -68,7 +79,7 @@ INK = "#1a1a19"
 MUTED = "#6b6b66"
 SURFACE = "#fcfcfb"
 GRID = "#e4e3df"
-CMAP = plt.get_cmap("viridis")
+CMAP = plt.get_cmap("turbo")      # identical to MATLAB's turbo
 
 VAR_LABEL = r"Normalized acceleration variance   $\mathrm{Var}(|a|)/a_c^2$"
 METRICS = {
@@ -100,6 +111,37 @@ def load(path):
     # one label per test condition (pressure/fan setting); repeats are listed together
     df["cond"] = df["nominal_psi"].astype(int).astype(str) + "/" + \
         df["fan_setting"].astype(int).astype(str)
+    return df
+
+
+def sensor_id(text):
+    m = re.fullmatch(r"[sS]?([1-4])", str(text).strip())
+    if not m:
+        raise SystemExit(f"--sensor {text!r}: use S1 to S4")
+    return int(m[1])
+
+
+def apply_sensor(df, angles_path, sid):
+    """Replace the all-sensor maximum / 90th percentile / clip count with those of one accelerometer."""
+    a = pd.read_csv(angles_path)
+    col = f"nvar_s{sid}"
+    if not {"run_name", "motor_angle_deg", col} <= set(a.columns):
+        raise SystemExit(f"{angles_path} needs run_name, motor_angle_deg and {col}")
+    rows = []
+    for run, g in a.dropna(subset=["motor_angle_deg", col]).groupby("run_name"):
+        v = g[col].to_numpy(float)
+        comp = g["accel_clip_components"] if "accel_clip_components" in g.columns else []
+        rows.append(dict(
+            run_name=run, nvar_max=float(v.max()),
+            nvar_max_angle_deg=float(g["motor_angle_deg"].to_numpy(float)[int(np.argmax(v))]),
+            nvar_p90=float(np.quantile(v, 0.9)),
+            n_accel_clipped=int(sum(sid in {int(x) for x in re.findall(r"s(\d)_", c)}
+                                    for c in comp if isinstance(c, str)))))
+    s = pd.DataFrame(rows)
+    df = df.drop(columns=[c for c in ("nvar_max", "nvar_max_angle_deg", "nvar_p90", "n_accel_clipped",
+                                      "nvar_max_unclipped") if c in df.columns]).merge(s, on="run_name", how="left")
+    df = df.dropna(subset=["nvar_max"]).copy()
+    df["clipped"] = df["n_accel_clipped"].fillna(0) > 0
     return df
 
 
@@ -157,7 +199,7 @@ def draw(ax, df, metric, title, norm, labels=True, ylabel=True, partial_ring=Fal
     ax.set_xticklabels([f"{t:,.0f}" for t in ticks])
     ax.minorticks_off()
     ax.tick_params(labelleft=True)
-    # ax.set_title(title, loc="left", fontsize=11, color=INK)
+    ax.set_title(title, loc="left", fontsize=11, color=INK)
     ax.set_facecolor(SURFACE)
     ax.grid(True, which="major", color=GRID, linewidth=0.8, zorder=0)
     ax.set_axisbelow(True)
@@ -166,8 +208,6 @@ def draw(ax, df, metric, title, norm, labels=True, ylabel=True, partial_ring=Fal
     for s in ("left", "bottom"):
         ax.spines[s].set_color(MUTED)
     ax.tick_params(colors=MUTED, which="both")
-    for spine in ["top", "right", "left", "bottom"]:
-        ax.spines[spine].set_visible(True)
 
 
 CANDIDATES = [(10, 6, "left", "bottom"), (10, -6, "left", "top"), (-10, 6, "right", "bottom"),
@@ -228,6 +268,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("master_runs", help="path to master_runs.csv")
+    ap.add_argument("--sensor", help="plot one accelerometer (S1..S4) instead of the worst of the four")
+    ap.add_argument("--angles", help="path to master_angles.csv (default: next to master_runs.csv)")
     ap.add_argument("--metrics", help="path to master_metrics.csv (default: next to master_runs.csv)")
     ap.add_argument("--out", help="output folder (default: <master_runs folder>/figures)")
     ap.add_argument("--dpi", type=int, default=200)
@@ -250,12 +292,26 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     df = load(src)
 
-    needs_metrics = (args.p90 == "weighted" and "p90" in panels or args.full_only
-                     or any(p in ("excess", "width") for p in panels))
-    mpath = Path(args.metrics) if args.metrics else src.parent / "master_metrics.csv"
+    sid = sensor_id(args.sensor) if args.sensor and args.sensor.lower() != "all" else None
+    if sid:
+        apath = Path(args.angles) if args.angles else src.parent / "master_angles.csv"
+        if not apath.exists():
+            raise SystemExit(f"--sensor needs {apath} (or pass --angles)")
+        df = apply_sensor(df, apath, sid)
+
+    # metrics that depend on the chosen sensor (weighted p90, excess, width) vs the sweep coverage only
+    needs_sensor_metrics = (args.p90 == "weighted" and "p90" in panels
+                            or any(p in ("excess", "width") for p in panels))
+    needs_metrics = needs_sensor_metrics or args.full_only
+    mname = f"master_metrics_S{sid}.csv" if sid else "master_metrics.csv"
+    mpath = Path(args.metrics) if args.metrics else src.parent / mname
     if needs_metrics:
+        if not mpath.exists() and sid and args.full_only and not needs_sensor_metrics \
+                and (src.parent / "master_metrics.csv").exists():
+            mpath = src.parent / "master_metrics.csv"      # coverage does not depend on the sensor
         if not mpath.exists():
-            raise SystemExit(f"{mpath} not found; run angle_metrics.py first (or pass --metrics)")
+            hint = f"python angle_metrics.py {src.parent / 'master_angles.csv'}" + (f" --sensor S{sid}" if sid else "")
+            raise SystemExit(f"{mpath} not found; run:  {hint}  (or pass --metrics)")
         df = merge_metrics(df, mpath)
 
     if args.full_only:
@@ -268,12 +324,13 @@ def main():
             raise SystemExit("no full-sweep runs to plot")
 
     df["nvar_p90_count"] = df["nvar_p90"]
-    titles = {p: METRICS[p]["title"] for p in panels}
+    titles = {p: METRICS[p]["title"] + (f" (S{sid})" if sid else "") for p in panels}
     if args.p90 == "weighted" and "p90" in panels:
         if "nvar_p90_weighted" not in df.columns:
             raise SystemExit(f"{mpath} has no nvar_p90_weighted column")
         df["nvar_p90"] = df["nvar_p90_weighted"]
-        titles["p90"] += " (weighted by angular span)"
+        titles["p90"] = titles["p90"].replace(" (S", " (weighted by angular span, S", 1) if sid \
+            else titles["p90"] + " (weighted by angular span)"
     if any(p in ("excess", "width") for p in panels) and "baseline_reliable" in df.columns:
         unrel = df.loc[df["baseline_reliable"] == False, "run_name"].tolist()        # noqa: E712
         if unrel:
@@ -282,7 +339,7 @@ def main():
                   + "\n  ".join(unrel))
     if "width" in panels and {"threshold", "baseline"} <= set(df.columns):
         k = (df["threshold"] / df["baseline"]).median()
-        titles["width"] = f"Vibrating width (variance > {k:g} × baseline)"
+        titles["width"] = f"Vibrating width (variance > {k:g} × baseline)" + (f" (S{sid})" if sid else "")
 
     # panels of the same kind (max/p90) share one norm and colorbar unless --separate-cbars
     groups = {}
@@ -312,7 +369,7 @@ def main():
     handles = [
         Line2D([], [], marker="o", ls="", ms=9, mfc="#bdbdb8", mec=INK, mew=0.7, label="no clipped angles"),
         Line2D([], [], marker="s", ls="", ms=9, mfc="#bdbdb8", mec=INK, mew=0.7,
-               label="≥1 clipped angle (value is a lower bound)"),
+               label=(f"≥1 angle with S{sid} clipped" if sid else "≥1 clipped angle") + " (value is a lower bound)"),
     ]
     if any(METRICS[p]["kind"] in ("excess", "width") for p in panels) and "full_sweep" in df.columns \
             and (df["full_sweep"] == False).any():                                   # noqa: E712
@@ -328,6 +385,8 @@ def main():
         name += "_" + "_".join(panels)
     if args.p90 == "weighted" and "p90" in panels:
         name += "_weighted"
+    if sid:
+        name += f"_S{sid}"
     if args.full_only:
         name += "_fullonly"
     if args.cbar == "linear":
@@ -341,9 +400,10 @@ def main():
             "nvar_max_unclipped", "n_accel_clipped", "accel_fs"]
     cols = [c for c in cols if c in df.columns]
     table = df.sort_values("nvar_max", ascending=False)[cols]
-    table.to_csv(out / "design_space_table.csv", index=False)
+    tpath = out / (f"design_space_table_S{sid}.csv" if sid else "design_space_table.csv")
+    table.to_csv(tpath, index=False)
     print(table.to_string(index=False, float_format=lambda v: f"{v:.3g}"))
-    print(f"\nWrote {png}\n      {out / 'design_space_table.csv'}")
+    print(f"\nWrote {png}\n      {tpath}")
 
 
 if __name__ == "__main__":

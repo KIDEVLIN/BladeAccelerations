@@ -26,7 +26,7 @@ several runs (e.g. 704psi) compares them all.
 
 Options
     --sensor S4 [S1 ...]   accelerometers to plot (default all four)
-    --layout {overlay,stacked}   comparison layout (default overlay, up to 8 runs)
+    --layout {overlay,stacked}   comparison layout (default overlay; >8 runs switches to a colour ramp)
     --yscale {log,linear}  variance axis (default log: the quiet floor and the peaks are both visible)
     --bands                shade the vibrating angle ranges (needs master_metrics.csv from angle_metrics.py).
                            Single dataset and stacked: also draws the baseline and threshold. The ranges
@@ -364,8 +364,15 @@ def fig_single(run, d, info, met, sensors, args, out_png):
 
 
 def fig_overlay(runs, data, infos, mets, sensors, args, out_png):
-    if len(runs) > len(CAT):
-        raise SystemExit(f"overlay supports up to {len(CAT)} runs; use --layout stacked for {len(runs)}")
+    if len(runs) <= len(CAT):
+        cols = CAT[:len(runs)]
+    else:
+        # more runs than distinct categorical hues: ramp (turbo) in the order the runs were given,
+        # so order them by Re or Ca_e on the command line and colour then encodes that order
+        cmap = plt.get_cmap("turbo")
+        cols = [cmap(0.05 + 0.9 * k / (len(runs) - 1)) for k in range(len(runs))]
+        print(f"NOTE: {len(runs)} runs > {len(CAT)}: colours are a turbo ramp in the order given "
+              "(low->high), so runs are told apart by order, not by distinct hue.")
     ref = data[runs[0]]
     show_frame = (not args.no_frame_panel and frame_available(ref))
     if show_frame and not frames_agree(runs, data):
@@ -380,7 +387,7 @@ def fig_overlay(runs, data, infos, mets, sensors, args, out_png):
         ax2 = None
     arrays, any_clip = [], False
     for k, run in enumerate(runs):
-        d, col = data[run], CAT[k]
+        d, col = data[run], cols[k]
         for s in sensors:
             i = s - 1
             ax.plot(d["th"], d["nv"][:, i], color=col, lw=1.6, marker=SENSOR_MARKERS[i], ms=4.8,
@@ -395,12 +402,13 @@ def fig_overlay(runs, data, infos, mets, sensors, args, out_png):
     set_variance_limits(ax, arrays, args.yscale)
     ax.set_ylabel(YLABEL, color=INK)
 
-    handles = [Line2D([], [], color=CAT[k], lw=2.2, label=run_label(r, infos.get(r))) for k, r in enumerate(runs)]
+    handles = [Line2D([], [], color=cols[k], lw=2.2, label=run_label(r, infos.get(r))) for k, r in enumerate(runs)]
     if len(sensors) > 1:
         handles += sensor_handles(sensors, False, with_color=False)
     if any_clip:
         handles.append(Line2D([], [], marker="o", ls="", ms=9, mfc="none", mec=INK, mew=1.2, label="clipped (lower bound)"))
-    ax.legend(handles=handles, loc="upper left", ncol=1 if len(handles) <= 4 else 2, frameon=False, fontsize=9,
+    ax.legend(handles=handles, loc="upper left", ncol=1 if len(handles) <= 4 else (2 if len(handles) <= 12 else 3), frameon=False,
+              fontsize=9 if len(handles) <= 12 else 8,
               labelcolor=INK)
     style_axes(ax)
     if not args.no_title:
