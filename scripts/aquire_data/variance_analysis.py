@@ -22,13 +22,21 @@ ACCEL_COLS = [f"s{s}_{axis}" for s in range(1, NUM_SENSORS + 1) for axis in "xyz
 LOAD_FORCE_COLS = ["Fx", "Fy", "Fz"]
 
 
+def accel_mg_per_lsb(accel_df):
+    """Sensitivity (mg/LSB) of a loaded accel capture. It depends on the
+    full-scale range the capture was taken in (2g/4g/8g/16g) and is read from
+    the CSV header by run_loader.load_accel_csv. Falls back to the 2g value
+    for frames without it (very old files, or frames built by hand)."""
+    return accel_df.attrs.get("mg_per_lsb", MG_PER_LSB)
+
+
 def accel_per_sensor_variance(accel_df):
     """Returns {1: var1, ..., NUM_SENSORS: varN} -- variance (mg^2) of
     each sensor's own acceleration-magnitude signal, kept separate
     (no averaging across sensors, unlike
     live_varience_plot.accel_magnitude_variance)."""
     rows = accel_df[ACCEL_COLS].to_numpy(dtype=float)
-    arr = rows * MG_PER_LSB
+    arr = rows * accel_mg_per_lsb(accel_df)
     arr = arr.reshape(-1, NUM_SENSORS, 3)
     mags = np.linalg.norm(arr, axis=2)  # (N, sensor)
     return {i + 1: float(np.var(mags[:, i])) for i in range(NUM_SENSORS)}

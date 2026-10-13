@@ -9,6 +9,11 @@ axes. One PNG per requested plot (see PLOT_NAMES):
     accel_map     inclination vs angle of attack, colored by accel variance
     load_map      inclination vs angle of attack, colored by load-cell variance
 
+Accel variance is in g^2 by default. If every run has a characteristic
+acceleration (RunData.a_c_g, see normalization.py) the accel plots instead show
+the nondimensional variance a*^2 = Var(a) / a_c^2, so runs at different tunnel
+conditions / blades are comparable. Load-cell plots are never normalized.
+
 Conventions
   - Sweep plots: one color per run. When several accelerometer series are
     drawn per run (sensors=[1, 2, 3, 4]), the sensor is distinguished by
@@ -47,6 +52,7 @@ class RunData:
     captures: list
     sweep_angle_deg: Optional[float] = None
     mounting_angle_deg: Optional[float] = None
+    a_c_g: Optional[float] = None   # characteristic acceleration (g); None = plot raw g^2
 
 
 class _Prepared:
@@ -59,11 +65,13 @@ class _Prepared:
         self.order = np.argsort(self.motor)
         self.incl, self.aoa = _frame_angles(
             caps, self.motor, run.sweep_angle_deg, run.mounting_angle_deg)
-        # (n_angles, NUM_SENSORS), g^2
+        # (n_angles, NUM_SENSORS), g^2 -- or a*^2 (dimensionless) when normalized
         self.accel = np.array([
             [v[s + 1] for s in range(NUM_SENSORS)]
             for v in (accel_per_sensor_variance(c.accel_df) for c in caps)
         ]) * MG2_TO_G2
+        if run.a_c_g is not None:
+            self.accel = self.accel / run.a_c_g ** 2
         self.load = np.array([
             np.nan if v is None else v
             for v in (load_variance(c.load_df) for c in caps)
@@ -83,7 +91,12 @@ def _colors(n):
     return [cmap(i % 10) for i in range(n)]
 
 
-def _plot_accel_sweep(runs, sensors, out_path):
+def _accel_variance_label(normalized):
+    return (r"Accel magnitude variance, $a^{*2}$ ($a^* = a/a_c$)" if normalized
+            else r"Accel magnitude variance (g$^2$)")
+
+
+def _plot_accel_sweep(runs, sensors, out_path, normalized=False):
     fig, ax = plt.subplots(figsize=(8, 5))
     for run, color in zip(runs, _colors(len(runs))):
         for k, sensor in enumerate(sensors):
@@ -92,7 +105,7 @@ def _plot_accel_sweep(runs, sensors, out_path):
                     marker="o", linestyle=_LINESTYLES[k % len(_LINESTYLES)],
                     color=color, label=label)
     ax.set_xlabel("Motor angle (deg)")
-    ax.set_ylabel("Accel magnitude variance (g$^2$)")
+    ax.set_ylabel(_accel_variance_label(normalized))
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -172,6 +185,12 @@ def plot_variance_comparison(runs, plots, out_dir, sensors=(4,), map_sensor=4):
     Returns the list of PNG paths written."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    n_norm = sum(r.a_c_g is not None for r in runs)
+    if 0 < n_norm < len(runs):
+        raise ValueError(
+            "Only some runs have a characteristic acceleration (a_c_g) -- normalized "
+            "and raw variances can't share axes. Give every run one, or none.")
+    normalized = n_norm == len(runs) and len(runs) > 0
     prepared = [_Prepared(r) for r in runs]
     written = []
 
@@ -186,7 +205,7 @@ def plot_variance_comparison(runs, plots, out_dir, sensors=(4,), map_sensor=4):
     for name in plots:
         path = out_dir / f"{name}.png"
         if name == "accel_sweep":
-            _plot_accel_sweep(prepared, list(sensors), path)
+            _plot_accel_sweep(prepared, list(sensors), path, normalized=normalized)
             done(name, True)
         elif name == "load_sweep":
             done(name, _plot_load_sweep(prepared, path))
@@ -194,7 +213,8 @@ def plot_variance_comparison(runs, plots, out_dir, sensors=(4,), map_sensor=4):
             done(name, _plot_map(
                 prepared, lambda r: r.accel_series(map_sensor),
                 f"Accel magnitude variance ({_sensor_name(map_sensor)})",
-                "Variance (g$^2$)", "viridis", path))
+                r"Variance, $a^{*2}$" if normalized else "Variance (g$^2$)",
+                "viridis", path))
         elif name == "load_map":
             done(name, _plot_map(
                 prepared, lambda r: r.load,

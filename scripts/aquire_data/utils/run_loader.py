@@ -64,6 +64,7 @@ if str(_ACQUIRE_DIR) not in sys.path:
     sys.path.insert(0, str(_ACQUIRE_DIR))
 
 _T_START_RE = re.compile(r"t_start_perf_counter=([0-9.eE+\-]+)")
+_MG_PER_LSB_RE = re.compile(r"([0-9.]+)\s*mg/LSB")
 _ENCODER_ABS_RE = re.compile(r"start_time_perf_counter=([0-9.eE+\-]+)")
 _ANGLE_FILENAME_RE = re.compile(r"angle_([+\-]?\d+\.\d+)deg\.csv$")
 
@@ -74,6 +75,16 @@ def _read_header_t_start(path):
     with open(path) as f:
         first_line = f.readline()
     m = _T_START_RE.search(first_line)
+    return float(m.group(1)) if m else None
+
+
+def _read_header_mg_per_lsb(path):
+    """Reads the sensitivity from the '# LIS2DS12 <fs> mode, <x> mg/LSB, ...'
+    comment line (it depends on the accelerometer full-scale range the capture
+    was taken in). Returns None if absent (very old files)."""
+    with open(path) as f:
+        first_line = f.readline()
+    m = _MG_PER_LSB_RE.search(first_line)
     return float(m.group(1)) if m else None
 
 
@@ -114,10 +125,17 @@ def _reconstruct_batch_times(df, time_col="time"):
 def load_accel_csv(path):
     """Returns (DataFrame, t_start_perf_counter_or_None). The "time"
     column is reconstructed to one timestamp per row -- see
-    _reconstruct_batch_times() / the module docstring."""
+    _reconstruct_batch_times() / the module docstring.
+
+    The accelerometer sensitivity from the CSV header is stored in
+    df.attrs["mg_per_lsb"] (absent if the header has none); use
+    variance_analysis.accel_mg_per_lsb(df) to read it with the 2g fallback."""
     t_start = _read_header_t_start(path)
     df = pd.read_csv(path, comment="#")
     df = _reconstruct_batch_times(df)
+    mg_per_lsb = _read_header_mg_per_lsb(path)
+    if mg_per_lsb is not None:
+        df.attrs["mg_per_lsb"] = mg_per_lsb
     return df, t_start
 
 
