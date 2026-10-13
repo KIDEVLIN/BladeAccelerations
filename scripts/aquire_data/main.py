@@ -79,23 +79,23 @@ MOTOR_BAUD = 115200
 PCB_PORT = "COM12"
 
 LOADCELL_DEVICE = "Dev11"          # NI DAQ device name (same box motor.py's trigger line lives on)
-LOADCELL_SAMPLE_RATE_HZ = 1000.0   # hardware-timed analog sample rate
+LOADCELL_SAMPLE_RATE_HZ = 2000.0   # hardware-timed analog sample rate
 RUN_LOAD_CELL = True               # False = accelerometer-only run, load cell skipped entirely
 
 RUN_ZERO_MEASUREMENT = True   # fan-off tare of the pitot dP channels (needs RUN_TUNNEL_CONDITIONS)
-ZERO_DURATION_S = 30          # length of the fan-off zero measurement
+ZERO_DURATION_S = 15          # length of the fan-off zero measurement
 ZERO_WARN_V = 10            # warn if a measured offset magnitude exceeds this (V)
 
 RUN_TUNNEL_CONDITIONS = True       # False = skip wind tunnel conditions entirely
 AIRFOIL_CHORD_M = 0.02             # Reynolds number length scale -- set per experiment
 
 ANGLES_FILE = "scripts/aquire_data/test_angles.xlsx"     # .xlsx, .csv, or .txt (one angle per line / row)
-OUTPUT_DIR = "Data/run3"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
+OUTPUT_DIR = "Data/Production_10-8-26/DTU10MW_704psi_500fs"     # created if it doesn't exist; nested under Data/ so it's easy to gitignore
 
 # Accelerometer mode for this run. Written to the PCB before every capture and
 # recorded in run_metadata.json + each accel CSV header. Can be overridden from
 # the command line:  python main.py --fs 8g --odr 800
-ACCEL_FS = "2g"               # full-scale range: "2g", "4g", "8g" or "16g"
+ACCEL_FS = "16g"               # full-scale range: "2g", "4g", "8g" or "16g"
 ACCEL_ODR_HZ = 1600           # output data rate: 100, 200, 400, 800 or 1600
 
 # Saturation check: a sample counts as "at the maximum" when a component's raw
@@ -105,7 +105,7 @@ ACCEL_ODR_HZ = 1600           # output data rate: 100, 200, 400, 800 or 1600
 ACCEL_SAT_LEVEL = 0.995
 ACCEL_SAT_WARN_FRACTION = 0.01
 
-SAMPLE_DURATION_S = 2         # how long to capture accel + load data at each angle
+SAMPLE_DURATION_S = 60         # how long to capture accel + load data at each angle
 SETTLE_TIME_S = 2             # pause after move, before capture starts
 
 # Coordinate-frame constants (see utils/coordinate_transforms.py).
