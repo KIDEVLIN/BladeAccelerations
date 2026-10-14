@@ -14,7 +14,8 @@ Stage 2 (seconds): merge every run's summary into two master tables:
 
 Output layout (default --out Production_summaries/):
     <out>/<run_name>/angle_summary.csv
-    <out>/<run_name>/spectra.npz
+    <out>/<run_name>/spectra.npz     Welch spectra per angle: |a| and per-axis accel PSDs, load-cell |F| and
+                                     per-component PSDs, load-cell force/moment cross-spectra (see below)
     <out>/<run_name>/run_info.json
     <out>/master_angles.csv
     <out>/master_runs.csv
@@ -26,6 +27,15 @@ Usage (from scripts/aquire_data, so utils/ is importable):
 
 Runs whose summary already exists (same EXTRACTOR_VERSION) are skipped unless
 --force is given, so adding run 16 does not reprocess runs 1-15.
+
+spectra.npz keys (i = angle index, same order as angle_summary.csv):
+    f_accel_i, psd_accel_i          freq (Hz), (4 sensors, nf)  PSD of |a|,           g^2/Hz
+    psd_accel_axes_i                (4 sensors, 3 axes x/y/z, nf) PSD of each axis, g^2/Hz (mean removed)
+    f_load_i, psd_load_i            freq (Hz), PSD of |F|
+    psd_load_axes_i                 (6, nf) PSD of Fx Fy Fz Mx My Mz
+    csd_load_force_i, csd_load_moment_i   (6, nf) complex cross-spectra xx yy zz xy xz yz of the force and
+                                    moment triads, so PSDs in a rotated load-cell frame follow later as R S R^T
+                                    (skip with --no-csd). All Welch, nperseg=--nperseg, constant detrend.
 
 Normalization (per run, from MEASURED conditions in run_metadata.json):
     F_c   = 0.5 * rho * U^2 * c_avg * b            (characteristic force, N)
@@ -47,7 +57,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.signal import welch
+from scipy.signal import csd, welch
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -59,12 +69,15 @@ from utils.run_loader import (  # noqa: E402
 )
 from utils import coordinate_transforms as ct  # noqa: E402
 
-EXTRACTOR_VERSION = "1.0"
+EXTRACTOR_VERSION = "1.2"   # 1.1: per-axis nvar_s{k}_{x,y,z}; 1.2: per-axis PSDs (accel + load cell) and load-cell CSDs
 
 G = 9.80665
 NUM_SENSORS = 4
 ACCEL_COLS = [f"s{s}_{a}" for s in range(1, NUM_SENSORS + 1) for a in "xyz"]
 FORCE_COLS = ["Fx", "Fy", "Fz"]
+MOMENT_COLS = ["Mx", "My", "Mz"]
+LOAD_AXES = FORCE_COLS + MOMENT_COLS
+CSD_PAIRS = [(0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2)]   # xx, yy, zz, xy, xz, yz
 STG_COLS = [f"stg{i}" for i in range(6)]
 TO_PSI = 1.0 / 6894.75729
 ONE_ATM_PA = 101325.01
@@ -78,7 +91,7 @@ DAQ_RANGE_V = 10.0
 DAQ_CLIP_LEVEL = 0.99
 
 # Blade constants (model scale, 318:1)
-DEFAULTS = dict(chord_avg_m=0.0138, span_m=0.28, mass_kg=0.0267, B_e=0.2475)
+DEFAULTS = dict(chord_avg_m=0.0138, span_m=0.28, mass_kg=0.0267, B_e=3.47e8)
 
 NAME_RE = re.compile(r"^(?P<blade>.+?)_(?P<psi>\d+)psi_(?P<fs>\d+)fs(?:_v(?P<v>\d+))?$")
 
@@ -181,20 +194,34 @@ def analyze_angle(i, angle_val, accel_path, load_path, info, meta_rows, enc, arg
 
     # ---- accel variance / spectra ----
     keep = t >= args.trim_s
-    mags = np.linalg.norm((raw * mg / 1000.0).reshape(-1, NUM_SENSORS, 3), axis=2)  # (N,4) in g
+    acc_g = (raw * mg / 1000.0).reshape(-1, NUM_SENSORS, 3)                         # (N,4,3) in g
+    mags = np.linalg.norm(acc_g, axis=2)                                             # (N,4) in g
     a_c = info["a_c_g"]
     spec = {}
     nper = min(args.nperseg, int(keep.sum()))
     psd_acc = []
+    psd_axes = np.full((NUM_SENSORS, 3, nper // 2 + 1), np.nan, dtype=np.float32) if nper >= 16 else None
     for s in range(NUM_SENSORS):
         x = mags[keep, s]
         v = float(np.var(x)) if len(x) else np.nan
         row[f"var_g2_s{s + 1}"] = v
         row[f"nvar_s{s + 1}"] = v / a_c ** 2 if math.isfinite(a_c) and a_c > 0 else np.nan
+        # per-axis variance (sensor axes x, y, z), same normalization: Var(a_axis)/a_c^2.
+        # Var(|a|) is blind to motion perpendicular to the static (gravity) direction; these are not.
+        for j, ax_name in enumerate("xyz"):
+            vj = float(np.var(acc_g[keep, s, j])) if len(x) else np.nan
+            row[f"var_g2_s{s + 1}_{ax_name}"] = vj
+            row[f"nvar_s{s + 1}_{ax_name}"] = vj / a_c ** 2 if math.isfinite(a_c) and a_c > 0 else np.nan
         if len(x) >= 16 and math.isfinite(fs_acc):
             f, p = welch(x - x.mean(), fs=fs_acc, nperseg=nper)
             pk_f, pk_p = spectrum_peak(f, p, args.min_peak_hz)
             psd_acc.append(p)
+            for j, ax_name in enumerate("xyz"):
+                xa = acc_g[keep, s, j]
+                _, pa = welch(xa - xa.mean(), fs=fs_acc, nperseg=nper)
+                psd_axes[s, j] = pa
+                row[f"peak_hz_s{s + 1}_{ax_name}"], row[f"peak_psd_s{s + 1}_{ax_name}"] = \
+                    spectrum_peak(f, pa, args.min_peak_hz)
         else:
             f, pk_f, pk_p = None, np.nan, np.nan
         row[f"peak_hz_s{s + 1}"] = pk_f
@@ -202,6 +229,8 @@ def analyze_angle(i, angle_val, accel_path, load_path, info, meta_rows, enc, arg
     if psd_acc:
         spec[f"f_accel_{i}"] = f
         spec[f"psd_accel_{i}"] = np.array(psd_acc)
+        if psd_axes is not None and len(psd_acc) == NUM_SENSORS:
+            spec[f"psd_accel_axes_{i}"] = psd_axes          # (sensor, axis x/y/z, freq), g^2/Hz, mean removed
     row["nvar_max_sensor"] = float(np.nanmax([row[f"nvar_s{s}"] for s in range(1, 5)]))
     row["nvar_max_sensor_which"] = int(np.nanargmax([row[f"nvar_s{s}"] for s in range(1, 5)]) + 1)
 
@@ -231,6 +260,18 @@ def analyze_angle(i, angle_val, accel_path, load_path, info, meta_rows, enc, arg
             f, p = welch(xl, fs=fs_l, nperseg=min(args.nperseg, len(xl)))
             row["load_peak_hz"], _ = spectrum_peak(f, p, args.min_peak_hz)
             spec[f"f_load_{i}"], spec[f"psd_load_{i}"] = f, p
+            # per-component PSDs (Fx Fy Fz Mx My Mz) and, so the load cell can be rotated into any frame later,
+            # the cross-spectra of the force triad and the moment triad: S' = R S R^T per frequency
+            comps = load_df[LOAD_AXES].to_numpy(dtype=float)[keep_l]
+            comps = comps - comps.mean(axis=0)
+            nl = min(args.nperseg, len(xl))
+            spec[f"psd_load_axes_{i}"] = np.array(
+                [welch(comps[:, c], fs=fs_l, nperseg=nl)[1] for c in range(6)], dtype=np.float32)
+            if not args.no_csd:
+                for name, base in (("force", 0), ("moment", 3)):
+                    spec[f"csd_load_{name}_{i}"] = np.array(
+                        [csd(comps[:, base + a], comps[:, base + b], fs=fs_l, nperseg=nl)[1] for a, b in CSD_PAIRS],
+                        dtype=np.complex64)             # rows: xx yy zz xy xz yz
     else:
         notes.append("no load-cell file")
 
@@ -322,7 +363,7 @@ def build_catalog(out_root):
         for k in ("blade", "nominal_psi", "fan_setting", "version", "density_kg_m3",
                   "velocity_m_s", "reynolds_number", "cauchy_edgewise",
                   "static_pressure_gauge_psi", "F_c_N", "a_c_g"):
-            df[k] = info.get(k)
+            df = df.assign(**{k: info.get(k)})
         angle_frames.append(df)
 
         ok = ~df["accel_clipped"].astype(bool)
@@ -368,11 +409,13 @@ def main():
     ap.add_argument("--nperseg", type=int, default=2048, help="Welch segment length")
     ap.add_argument("--min-peak-hz", type=float, default=5.0,
                     help="lowest frequency considered when picking a spectral peak")
+    ap.add_argument("--no-csd", action="store_true",
+                    help="skip the load-cell cross-spectra (smaller spectra.npz; no later frame rotation of PSDs)")
     ap.add_argument("--chord-avg-m", type=float, default=DEFAULTS["chord_avg_m"])
     ap.add_argument("--span-m", type=float, default=DEFAULTS["span_m"])
     ap.add_argument("--mass-kg", type=float, default=DEFAULTS["mass_kg"])
     ap.add_argument("--B-e", type=float, default=DEFAULTS["B_e"],
-                    help="average edgewise bending stiffness for Ca_e (default 0.2475)")
+                    help="average edgewise bending stiffness for Ca_e (default 3.47e8)")
     args = ap.parse_args()
 
     out_root = Path(args.out)

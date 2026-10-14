@@ -16,6 +16,13 @@ extract_run_summary.py); no raw data is read. Three uses:
   3. The same comparison as one row per dataset (shared axes), for more than a few runs
          python plot_angle_sweep.py Production_summaries/master_angles.csv --run 704/400 704/500 704/600 704/700 --sensor S4 --layout stacked
 
+  4. One component of the acceleration instead of the magnitude (x, y or z of each sensor)
+         python plot_angle_sweep.py Production_summaries/master_angles.csv --run 704/800 --component z
+         python plot_angle_sweep.py Production_summaries/master_angles.csv --run 385/800 704/600 --sensor S4 --component x
+         python plot_angle_sweep.py Production_summaries/master_angles.csv --run 704/800 --component xyz --sensor S4
+     --component xyz puts x, y, z (and the magnitude, dashed grey) on one axis, one panel per selected
+     sensor; it is for a single dataset. x/y/z/mag work with every layout.
+
   --run all makes one single-dataset figure per run (in <out>/angle_sweeps/).
 
 Put the master_angles.csv path first; --run and --sensor take several values.
@@ -26,6 +33,10 @@ several runs (e.g. 704psi) compares them all.
 
 Options
     --sensor S4 [S1 ...]   accelerometers to plot (default all four)
+    --component {mag,x,y,z,xyz}   mag (default) = Var(|a|)/a_c^2 as before. x/y/z = Var(a_axis)/a_c^2 for that
+                           sensor axis (needs the per-axis columns nvar_s{k}_{x,y,z}, i.e. extract_run_summary.py
+                           version 1.1 or later). xyz = all three axes for one dataset.
+                           Axes are the SENSOR's x, y, z, not blade span/chord/flap directions.
     --layout {overlay,stacked}   comparison layout (default overlay; >8 runs switches to a colour ramp)
     --yscale {log,linear}  variance axis (default log: the quiet floor and the peaks are both visible)
     --bands                shade the vibrating angle ranges (needs master_metrics.csv from angle_metrics.py).
@@ -42,7 +53,7 @@ Encoding
     single dataset / stacked rows: color + marker shape = accelerometer (S1 circle, S2 square, S3 triangle, S4 diamond)
     overlay: color = dataset (legend gives Re and Ca_e), marker shape = accelerometer
     ring around a point = that sensor had >=1% of samples at full scale at that angle (clipped, the
-                          variance there is a LOWER BOUND)
+                          variance there is a LOWER BOUND). For a single axis only that axis counts.
 
 All datasets are normalized by their own a_c, so heights are comparable between runs.
 
@@ -135,23 +146,42 @@ def parse_sensors(vals):
 # Data helpers
 # --------------------------------------------------
 
-def clipped_sensors(s):
+def clipped_sensors(s, axis=None):
+    """Sensors named in an accel_clip_components string ("s2_x=3.0%;s2_z=1.2%"); optionally one axis only."""
     if not isinstance(s, str) or not s:
         return set()
-    return {int(x) for x in re.findall(r"s(\d)_", s)}
+    return {int(a) for a, b in re.findall(r"s(\d)_([xyz])", s) if axis in (None, b)}
 
 
-def prepare(g):
-    g = g.sort_values("motor_angle_deg")
-    nv = np.column_stack([g[f"nvar_s{i}"].to_numpy(float) for i in range(1, NS + 1)])
-    clip = np.zeros_like(nv, dtype=bool)
+AXES = ("x", "y", "z")
+
+
+def axis_cols(component):
+    return [f"nvar_s{i}" if component == "mag" else f"nvar_s{i}_{component}" for i in range(1, NS + 1)]
+
+
+def clip_matrix(g, axis=None):
+    clip = np.zeros((len(g), NS), dtype=bool)
     comp = g["accel_clip_components"] if "accel_clip_components" in g else pd.Series([None] * len(g), index=g.index)
     for r, s in enumerate(comp):
-        for sid in clipped_sensors(s):
+        for sid in clipped_sensors(s, axis):
             if 1 <= sid <= NS:
                 clip[r, sid - 1] = True
+    return clip
+
+
+def prepare(g, component="mag"):
+    g = g.sort_values("motor_angle_deg")
+    comps = AXES if component == "xyz" else ([component] if component != "mag" else [])
+    nv_mag = np.column_stack([g[c].to_numpy(float) for c in axis_cols("mag")])
+    nvc = {a: np.column_stack([g[c].to_numpy(float) for c in axis_cols(a)]) for a in comps}
+    clipc = {a: clip_matrix(g, a) for a in comps}
+    if component in AXES:
+        nv, clip = nvc[component], clipc[component]
+    else:
+        nv, clip = nv_mag, clip_matrix(g)
     return dict(
-        th=g["motor_angle_deg"].to_numpy(float), nv=nv, clip=clip,
+        th=g["motor_angle_deg"].to_numpy(float), nv=nv, clip=clip, nv_mag=nv_mag, nvc=nvc, clipc=clipc,
         touched=g["accel_touched_max"].astype(bool).to_numpy() if "accel_touched_max" in g else np.zeros(len(g), bool),
         incl=g["inclination_deg"].to_numpy(float) if "inclination_deg" in g else None,
         aoa=g["aoa_deg"].to_numpy(float) if "aoa_deg" in g else None,
@@ -293,6 +323,14 @@ def finish_x(ax_last, th_all):
 YLABEL = r"Normalized variance   $\mathrm{Var}(|a|)/a_c^2$"
 
 
+def ylabel_for(component):
+    if component in AXES:
+        return rf"Normalized variance   $\mathrm{{Var}}(a_{component})/a_c^2$"
+    if component == "xyz":
+        return r"Normalized variance   $\mathrm{Var}(a_i)/a_c^2$"
+    return YLABEL
+
+
 def sensor_handles(sensors, any_clip, with_color=True):
     h = []
     for s in sensors:
@@ -309,13 +347,13 @@ def save(fig, out_png, dpi):
     plt.close(fig)
 
 
-def long_table(runs, data, sensors):
+def long_table(runs, data, sensors, component="mag"):
     rows = []
     for r in runs:
         d = data[r]
         for s in sensors:
             for k in range(len(d["th"])):
-                rows.append(dict(run_name=r, sensor=f"S{s}", motor_angle_deg=d["th"][k],
+                rows.append(dict(run_name=r, sensor=f"S{s}", component=component, motor_angle_deg=d["th"][k],
                                  nvar=d["nv"][k, s - 1], clipped=bool(d["clip"][k, s - 1])))
     return pd.DataFrame(rows)
 
@@ -336,7 +374,7 @@ def fig_single(run, d, info, met, sensors, args, out_png):
     set_variance_limits(ax, [d["nv"][:, s - 1] for s in sensors], args.yscale)
     if args.bands:
         draw_bands(ax, met)
-    ax.set_ylabel(YLABEL, color=INK)
+    ax.set_ylabel(ylabel_for(args.component), color=INK)
     handles = sensor_handles(sensors, d["clip"][:, [s - 1 for s in sensors]].any())
     if args.bands and met is not None and parse_bands(met.get("bands")):
         handles.append(plt.Rectangle((0, 0), 1, 1, color=MUTED, alpha=0.2, lw=0, label="vibrating range"))
@@ -344,7 +382,8 @@ def fig_single(run, d, info, met, sensors, args, out_png):
               labelcolor=INK, columnspacing=1.4, handletextpad=0.5)
     style_axes(ax)
     if not args.no_title:
-        ax.set_title(conditions_line(run, info), loc="left", fontsize=11, color=INK)
+        ax.set_title(conditions_line(run, info) + (f"   ·   {args.component} axis" if args.component in AXES else ""),
+                     loc="left", fontsize=11, color=INK)
     last = ax
     if ax2 is not None:
         draw_frame_panel(ax2, d["th"], d["incl"], d["aoa"])
@@ -360,6 +399,63 @@ def fig_single(run, d, info, met, sensors, args, out_png):
     tab["touched_full_scale"] = d["touched"]
     if d["incl"] is not None:
         tab["inclination_deg"], tab["aoa_deg"] = d["incl"], d["aoa"]
+    tab.to_csv(out_png.with_suffix(".csv"), index=False)
+
+
+COMP_COLORS = {"x": CAT[0], "y": CAT[1], "z": CAT[2]}
+COMP_MARKERS = {"x": "o", "y": "s", "z": "^"}
+
+
+def fig_components(run, d, info, met, sensors, args, out_png):
+    """One panel per selected sensor; x, y, z (and |a| dashed) on each."""
+    n = len(sensors)
+    has_frame = not args.no_frame_panel and frame_available(d)
+    rows = n + (1 if has_frame else 0)
+    fig = plt.figure(figsize=(11, 3.0 * n + (1.9 if has_frame else 0.5) + 0.4), facecolor=SURFACE,
+                     constrained_layout=True)
+    gs = fig.add_gridspec(rows, 1, height_ratios=[1.0] * n + ([0.7] if has_frame else []))
+    axes, any_clip = [], False
+    for k, sid in enumerate(sensors):
+        ax = fig.add_subplot(gs[k], sharex=axes[0] if axes else None, sharey=axes[0] if axes else None)
+        axes.append(ax)
+        i = sid - 1
+        ax.plot(d["th"], d["nv_mag"][:, i], color=MUTED, lw=1.2, ls=(0, (4, 3)), zorder=2)
+        for a in AXES:
+            ax.plot(d["th"], d["nvc"][a][:, i], color=COMP_COLORS[a], lw=1.6, marker=COMP_MARKERS[a], ms=4.4,
+                    mec=SURFACE, mew=0.6, zorder=3)
+            m = d["clipc"][a][:, i]
+            if m.any():
+                any_clip = True
+                ax.scatter(d["th"][m], d["nvc"][a][m, i], s=95, facecolor="none", edgecolor=INK, linewidth=1.2, zorder=6)
+        style_axes(ax)
+        ax.set_title(f"S{sid}", loc="left", fontsize=10, color=INK)
+        ax.tick_params(labelbottom=False)
+    set_variance_limits(axes[0], [d["nvc"][a][:, s - 1] for a in AXES for s in sensors]
+                        + [d["nv_mag"][:, s - 1] for s in sensors], args.yscale)
+    h = [Line2D([], [], color=COMP_COLORS[a], marker=COMP_MARKERS[a], ms=6, lw=1.6, mec=SURFACE, mew=0.6,
+                label=f"{a} axis") for a in AXES]
+    h.append(Line2D([], [], color=MUTED, lw=1.2, ls=(0, (4, 3)), label="|a| (magnitude)"))
+    if any_clip:
+        h.append(Line2D([], [], marker="o", ls="", ms=9, mfc="none", mec=INK, mew=1.2, label="clipped (lower bound)"))
+    axes[0].legend(handles=h, loc="lower right", bbox_to_anchor=(1.0, 1.0), ncol=5, frameon=False, fontsize=9,
+                   labelcolor=INK, columnspacing=1.4, handletextpad=0.5, borderaxespad=0.2)
+    fig.supylabel(ylabel_for("xyz"), color=INK, fontsize=10)
+    if not args.no_title:
+        fig.suptitle(conditions_line(run, info), x=0.01, ha="left", fontsize=11, color=INK)
+    last = axes[-1]
+    if has_frame:
+        ax2 = fig.add_subplot(gs[n], sharex=axes[0])
+        draw_frame_panel(ax2, d["th"], d["incl"], d["aoa"])
+        last = ax2
+    finish_x(last, d["th"])
+    last.tick_params(labelbottom=True)
+    save(fig, out_png, args.dpi)
+    tab = pd.DataFrame({"motor_angle_deg": d["th"]})
+    for sid in sensors:
+        tab[f"nvar_s{sid}_mag"] = d["nv_mag"][:, sid - 1]
+        for a in AXES:
+            tab[f"nvar_s{sid}_{a}"] = d["nvc"][a][:, sid - 1]
+            tab[f"s{sid}_{a}_clipped"] = d["clipc"][a][:, sid - 1]
     tab.to_csv(out_png.with_suffix(".csv"), index=False)
 
 
@@ -400,7 +496,7 @@ def fig_overlay(runs, data, infos, mets, sensors, args, out_png):
         if args.bands:
             draw_bands(ax, mets.get(run), color=col, alpha=0.09, lines=False)
     set_variance_limits(ax, arrays, args.yscale)
-    ax.set_ylabel(YLABEL, color=INK)
+    ax.set_ylabel(ylabel_for(args.component), color=INK)
 
     handles = [Line2D([], [], color=cols[k], lw=2.2, label=run_label(r, infos.get(r))) for k, r in enumerate(runs)]
     if len(sensors) > 1:
@@ -412,7 +508,9 @@ def fig_overlay(runs, data, infos, mets, sensors, args, out_png):
               labelcolor=INK)
     style_axes(ax)
     if not args.no_title:
-        ax.set_title("Accelerometer " + ", ".join(f"S{s}" for s in sensors), loc="left", fontsize=11, color=INK)
+        ax.set_title("Accelerometer " + ", ".join(f"S{s}" for s in sensors)
+                     + (f"   ·   {args.component} axis" if args.component in AXES else ""),
+                     loc="left", fontsize=11, color=INK)
     last = ax
     if ax2 is not None:
         draw_frame_panel(ax2, ref["th"], ref["incl"], ref["aoa"])
@@ -420,7 +518,7 @@ def fig_overlay(runs, data, infos, mets, sensors, args, out_png):
         last = ax2
     finish_x(last, np.concatenate([data[r]["th"] for r in runs]))
     save(fig, out_png, args.dpi)
-    long_table(runs, data, sensors).to_csv(out_png.with_suffix(".csv"), index=False)
+    long_table(runs, data, sensors, args.component).to_csv(out_png.with_suffix(".csv"), index=False)
 
 
 def fig_stacked(runs, data, infos, mets, sensors, args, out_png):
@@ -451,7 +549,7 @@ def fig_stacked(runs, data, infos, mets, sensors, args, out_png):
     set_variance_limits(axes[0], arrays, args.yscale)
     axes[0].legend(handles=sensor_handles(sensors, any_clip), loc="upper left", ncol=5, frameon=False,
                    fontsize=9, labelcolor=INK, columnspacing=1.4, handletextpad=0.5)
-    fig.supylabel(YLABEL, color=INK, fontsize=10)
+    fig.supylabel(ylabel_for(args.component), color=INK, fontsize=10)
     last = axes[-1]
     if show_frame:
         ax2 = fig.add_subplot(gs[n], sharex=axes[0])
@@ -460,7 +558,7 @@ def fig_stacked(runs, data, infos, mets, sensors, args, out_png):
     finish_x(last, np.concatenate([data[r]["th"] for r in runs]))
     last.tick_params(labelbottom=True)
     save(fig, out_png, args.dpi)
-    long_table(runs, data, sensors).to_csv(out_png.with_suffix(".csv"), index=False)
+    long_table(runs, data, sensors, args.component).to_csv(out_png.with_suffix(".csv"), index=False)
 
 
 # --------------------------------------------------
@@ -472,6 +570,8 @@ def main():
     ap.add_argument("master_angles", help="path to master_angles.csv")
     ap.add_argument("--run", nargs="+", required=True, help="one or more runs (see above), or all")
     ap.add_argument("--sensor", nargs="+", help="accelerometers to plot, e.g. S4 or S1 S4 (default all four)")
+    ap.add_argument("--component", choices=["mag", "x", "y", "z", "xyz"], default="mag",
+                    help="mag = |a| (default); x/y/z = one sensor axis; xyz = all three axes (one dataset)")
     ap.add_argument("--layout", choices=["overlay", "stacked"], default="overlay",
                     help="layout when several runs are given (default overlay)")
     ap.add_argument("--yscale", choices=["log", "linear"], default="log")
@@ -486,9 +586,16 @@ def main():
 
     src = Path(args.master_angles)
     df = pd.read_csv(src)
-    need = {"run_name", "motor_angle_deg"} | {f"nvar_s{i}" for i in range(1, NS + 1)}
+    need = {"run_name", "motor_angle_deg"} | set(axis_cols("mag"))
+    if args.component in AXES:
+        need |= set(axis_cols(args.component))
+    elif args.component == "xyz":
+        need |= {c for a in AXES for c in axis_cols(a)}
     if not need <= set(df.columns):
-        raise SystemExit(f"{src} is missing columns: {sorted(need - set(df.columns))}")
+        miss = sorted(need - set(df.columns))
+        hint = ("\nPer-axis variance is written by extract_run_summary.py version 1.1+: rerun it "
+                "(runs summarized by an older version are reprocessed automatically).") if args.component != "mag" else ""
+        raise SystemExit(f"{src} is missing columns: {miss}{hint}")
     runs_path = Path(args.runs) if args.runs else src.parent / "master_runs.csv"
     runs_df = pd.read_csv(runs_path).set_index("run_name") if runs_path.exists() else None
     met_path = Path(args.metrics) if args.metrics else src.parent / "master_metrics.csv"
@@ -498,10 +605,14 @@ def main():
 
     sensors = parse_sensors(args.sensor)
     stag = "" if len(sensors) == NS else "_" + "".join(f"S{s}" for s in sensors)
+    if args.component != "mag":
+        stag += f"_{args.component}"
     targets, batch = resolve(sorted(df["run_name"].unique()), args.run)
     out = Path(args.out) if args.out else src.parent / "figures"
 
-    data = {r: prepare(df[df["run_name"] == r]) for r in targets}
+    if args.component == "xyz" and not (batch or len(targets) == 1):
+        raise SystemExit("--component xyz shows one dataset; for comparisons use --component x, y or z")
+    data = {r: prepare(df[df["run_name"] == r], args.component) for r in targets}
     infos = {r: runs_df.loc[r].to_dict() for r in targets if runs_df is not None and r in runs_df.index}
     mets = {r: met_df.loc[r].to_dict() for r in targets if met_df is not None and r in met_df.index}
 
@@ -509,7 +620,8 @@ def main():
         folder = out / "angle_sweeps" if batch else out
         for r in targets:
             png = folder / f"angle_sweep_{r}{stag}.png"
-            fig_single(r, data[r], infos.get(r), mets.get(r), sensors, args, png)
+            (fig_components if args.component == "xyz" else fig_single)(
+                r, data[r], infos.get(r), mets.get(r), sensors, args, png)
             print(f"Wrote {png}  (+ .csv table)")
     else:
         name = "angle_sweep_compare_" + "_".join(slug(r) for r in targets) + (stag or "_allsensors")
