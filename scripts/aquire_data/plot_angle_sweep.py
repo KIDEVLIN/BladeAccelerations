@@ -24,6 +24,8 @@ extract_run_summary.py); no raw data is read. Three uses:
      sensor; it is for a single dataset. x/y/z/mag work with every layout.
 
   --run all makes one single-dataset figure per run (in <out>/angle_sweeps/).
+  --run all --together puts every run on one figure instead (overlay: colour ramp ordered by Re; or
+  --layout stacked for one row per run). Best with --sensor S4 --component z to keep it readable.
 
 Put the master_angles.csv path first; --run and --sensor take several values.
 
@@ -574,6 +576,9 @@ def main():
                     help="mag = |a| (default); x/y/z = one sensor axis; xyz = all three axes (one dataset)")
     ap.add_argument("--layout", choices=["overlay", "stacked"], default="overlay",
                     help="layout when several runs are given (default overlay)")
+    ap.add_argument("--together", action="store_true",
+                    help="with --run all: draw all runs on ONE figure (overlay or stacked, ordered by Re) "
+                         "instead of one figure per run")
     ap.add_argument("--yscale", choices=["log", "linear"], default="log")
     ap.add_argument("--bands", action="store_true", help="shade vibrating ranges (needs master_metrics.csv)")
     ap.add_argument("--no-title", action="store_true")
@@ -610,13 +615,14 @@ def main():
     targets, batch = resolve(sorted(df["run_name"].unique()), args.run)
     out = Path(args.out) if args.out else src.parent / "figures"
 
-    if args.component == "xyz" and not (batch or len(targets) == 1):
+    single_figs = (batch and not args.together) or len(targets) == 1
+    if args.component == "xyz" and not single_figs:
         raise SystemExit("--component xyz shows one dataset; for comparisons use --component x, y or z")
     data = {r: prepare(df[df["run_name"] == r], args.component) for r in targets}
     infos = {r: runs_df.loc[r].to_dict() for r in targets if runs_df is not None and r in runs_df.index}
     mets = {r: met_df.loc[r].to_dict() for r in targets if met_df is not None and r in met_df.index}
 
-    if batch or len(targets) == 1:
+    if single_figs:
         folder = out / "angle_sweeps" if batch else out
         for r in targets:
             png = folder / f"angle_sweep_{r}{stag}.png"
@@ -624,7 +630,10 @@ def main():
                 r, data[r], infos.get(r), mets.get(r), sensors, args, png)
             print(f"Wrote {png}  (+ .csv table)")
     else:
-        name = "angle_sweep_compare_" + "_".join(slug(r) for r in targets) + (stag or "_allsensors")
+        if all(r in infos and np.isfinite(infos[r].get("reynolds_number", np.nan)) for r in targets):
+            targets = sorted(targets, key=lambda r: infos[r]["reynolds_number"])   # colour ramp then runs low -> high Re
+        who = f"all_{len(targets)}runs" if (batch or len(targets) > 6) else "_".join(slug(r) for r in targets)
+        name = "angle_sweep_compare_" + who + (stag or "_allsensors")
         if args.layout == "stacked":
             name += "_stacked"
         png = out / f"{name}.png"

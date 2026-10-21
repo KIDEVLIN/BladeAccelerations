@@ -40,7 +40,10 @@ Options
                            spectra and runs modes (default 5, about 3 Hz at the default resolution)
     --angles A [A ...]     spectra mode: motor angles to show (nearest measured), or "auto" (default)
     --npeaks N, --sep DEG  auto selection: number of peaks and minimum separation (default 3, 15 deg)
-    --at {peak,ANGLE}      runs mode: each run's variance-peak angle (default) or one fixed angle
+    --at {peak,ANGLE}      runs mode: each run's variance-peak angle (default) or one fixed angle. The angle
+                           (or the range of angles, for peak) is in the title and in the file name
+                           (..._atpeak_... / ..._at170deg_...), so different angles never overwrite each other
+    --no-peak              runs mode: leave out the peak-frequency markers and the lower peak-frequency panel
     --colorby {re,ca,u}    runs mode colouring (default re)
     --track                map mode: mark the dominant-peak frequency at angles whose variance is >= 3x the median
     --vmin / --vmax        map colour limits (default 1st and 99.9th percentile of the PSD)
@@ -308,12 +311,19 @@ def fig_runs(runs, data, infos, args, out):
     runs, vals = [runs[i] for i in order], vals[order]
     norm = (LogNorm if logc else Normalize)(vals.min(), vals.max() if vals.max() > vals.min() else vals.min() * 1.01)
     cmap = plt.get_cmap(CMAP)
-    fig = plt.figure(figsize=(11, 8.2), facecolor=SURFACE, constrained_layout=True)
-    gs = fig.add_gridspec(2, 2, height_ratios=[2.2, 1], width_ratios=[1, 0.025])
-    ax = fig.add_subplot(gs[0, 0])
-    axp = fig.add_subplot(gs[1, 0])
-    cax = fig.add_subplot(gs[:, 1])
-    rows = []
+    show_pk = not args.no_peak
+    if show_pk:
+        fig = plt.figure(figsize=(11, 8.2), facecolor=SURFACE, constrained_layout=True)
+        gs = fig.add_gridspec(2, 2, height_ratios=[2.2, 1], width_ratios=[1, 0.025])
+        ax = fig.add_subplot(gs[0, 0])
+        axp = fig.add_subplot(gs[1, 0])
+        cax = fig.add_subplot(gs[:, 1])
+    else:
+        fig = plt.figure(figsize=(11, 5.8), facecolor=SURFACE, constrained_layout=True)
+        gs = fig.add_gridspec(1, 2, width_ratios=[1, 0.025])
+        ax = fig.add_subplot(gs[0, 0])
+        cax = fig.add_subplot(gs[0, 1])
+    rows, angs = [], []
     for r, v in zip(runs, vals):
         D, info = data[r], infos[r]
         x, S = transform(D, info, args, args.smooth)
@@ -324,8 +334,10 @@ def fig_runs(runs, data, infos, args, out):
         k = np.where(m)[0][np.argmax(s[m])]
         col = cmap(norm(v))
         ax.plot(x[m], s[m], color=col, lw=1.4, zorder=3)
-        ax.scatter([x[k]], [s[k]], s=26, color=col, edgecolor=INK, linewidth=0.6, zorder=5)
-        axp.scatter([v], [x[k]], s=46, color=col, edgecolor=INK, linewidth=0.7, zorder=4)
+        angs.append(D["th"][j])
+        if show_pk:
+            ax.scatter([x[k]], [s[k]], s=26, color=col, edgecolor=INK, linewidth=0.6, zorder=5)
+            axp.scatter([v], [x[k]], s=46, color=col, edgecolor=INK, linewidth=0.7, zorder=4)
         rows.append(dict(run_name=r, colorby=args.colorby, value=v, motor_angle_deg=D["th"][j], nvar=D["nv"][j],
                          peak_hz=D["f"][k], peak_St=D["f"][k] * args.chord / info["velocity_m_s"], peak_psd=s[k],
                          clipped=bool(D["clip"][j])))
@@ -334,14 +346,21 @@ def fig_runs(runs, data, infos, args, out):
     ax.set_ylabel(sym_psd(args), color=INK)
     style_axes(ax)
     ax.grid(True, which="minor", color="#efeeea", linewidth=0.5, zorder=0)
-    where = "at each run's variance peak" if args.at == "peak" else f"at motor angle ≈ {float(args.at):g}°"
+    lo, hi = min(angs), max(angs)
+    span = f"{lo:g}°" if np.isclose(lo, hi, atol=0.05) else f"{lo:g}° to {hi:g}°"
+    if args.at == "peak":
+        where = f"at each run's variance-peak angle ({span})"
+    else:
+        where = f"at motor angle {float(args.at):g}°" + ("" if span == f"{float(args.at):g}°"
+                                                         else f" (nearest measured: {span})")
     ax.set_title(f"S{args.sensor_id} {band_label(args)}   ·   PSD {where}   ·   {len(runs)} runs", loc="left",
                  fontsize=11, color=INK)
-    if logc:
-        axp.set_xscale("log")
-    axp.set_xlabel(clabel, color=INK)
-    axp.set_ylabel("Peak St" if args.xaxis == "st" else "Peak frequency (Hz)", color=INK)
-    style_axes(axp)
+    if show_pk:
+        if logc:
+            axp.set_xscale("log")
+        axp.set_xlabel(clabel, color=INK)
+        axp.set_ylabel("Peak St" if args.xaxis == "st" else "Peak frequency (Hz)", color=INK)
+        style_axes(axp)
     sm = ScalarMappable(norm=norm, cmap=cmap)
     cb = fig.colorbar(sm, cax=cax)
     cb.set_label(clabel, color=INK)
@@ -373,6 +392,8 @@ def main():
     ap.add_argument("--sep", type=float, default=15.0)
     ap.add_argument("--at", default="peak")
     ap.add_argument("--colorby", choices=list(COLORBY), default="re")
+    ap.add_argument("--no-peak", action="store_true",
+                    help="runs mode: do not mark or plot the dominant peak frequency (PSD curves only)")
     ap.add_argument("--track", action="store_true")
     ap.add_argument("--vmin", type=float)
     ap.add_argument("--vmax", type=float)
@@ -404,9 +425,12 @@ def main():
         if len(targets) < 2:
             raise SystemExit("--mode runs needs several datasets (e.g. --run 704psi or --run all)")
         data = {r: load_run(summ, r, args.sensor_id, args.component) for r in targets}
-        name = f"psd_runs_{args.colorby}_{'all' if batch else '_'.join(slug(r) for r in targets)}_{tag}"
+        at = "atpeak" if args.at == "peak" else f"at{float(args.at):g}deg"
+        name = f"psd_runs_{args.colorby}_{'all' if batch else '_'.join(slug(r) for r in targets)}_{at}_{tag}"
+        if args.no_peak:
+            name += "_nopeak"
         if len(name) > 150:
-            name = f"psd_runs_{args.colorby}_{len(targets)}runs_{tag}"
+            name = f"psd_runs_{args.colorby}_{len(targets)}runs_{at}_{tag}" + ("_nopeak" if args.no_peak else "")
         png = out / f"{name}.png"
         fig_runs(targets, data, infos, args, png)
         print(f"Wrote {png}  (+ .csv table)")
