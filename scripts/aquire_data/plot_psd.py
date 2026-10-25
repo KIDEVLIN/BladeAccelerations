@@ -21,6 +21,10 @@ Accelerometer spectra from the per-angle Welch PSDs stored by extract_run_summar
            (flat in Hz -> fixed-frequency/structural; flat in St -> scales with the flow).
                python plot_psd.py Production_summaries --mode runs --run 704 --colorby re --xaxis st
                python plot_psd.py Production_summaries --mode runs --run all --at 170 --colorby ca
+           Peak regions (flags from angle_metrics.py, the same ones plot_design_space.py --flag shows):
+               python plot_psd.py Production_summaries --mode runs --run all --region 170 --colorby flag
+               python plot_psd.py Production_summaries --mode runs --run all --region 170 --flag-false grey
+               python plot_psd.py Production_summaries --mode runs --run all --region 170 --flag-false hide --colorby ca
 
 First argument: the Production_summaries folder (or the master_angles.csv inside it).
 --run takes folder names, short keys PSI/FAN[/VERSION], substrings, or all (same rules as plot_angle_sweep.py).
@@ -34,6 +38,12 @@ Options
                            so areas under curves still equal variances.
     --norm {ac,raw}        ac (default): PSD / a_c^2, so runs at different conditions are comparable
                            (same normalization as the variance plots); raw: g^2/Hz (g^2 per unit St)
+    --premult              spectra and runs modes: plot f*S(f) (St*S(St) with --xaxis st) on a LINEAR y axis against the
+                           log frequency axis. Because  integral S df = integral f*S d(ln f), equal areas under the curve
+                           now mean equal variance (energy), so the peaks can be compared by eye; on the log-log plot
+                           they cannot. The quantity is per unit ln f (normalized: dimensionless). Peak markers and the
+                           peak frequencies still come from the plain PSD S(f), not from f*S
+    --yscale {log,linear}  y axis of the spectra and runs modes (default log, or linear with --premult)
     --fmin / --fmax        frequency range shown and searched for peaks (Hz; default 5 .. 500)
     --flog                 log frequency axis (map: vertical axis; spectra/runs: x axis is always log)
     --smooth N             moving average over N frequency bins before plotting/peak picking in the
@@ -44,7 +54,20 @@ Options
                            (or the range of angles, for peak) is in the title and in the file name
                            (..._atpeak_... / ..._at170deg_...), so different angles never overwrite each other
     --no-peak              runs mode: leave out the peak-frequency markers and the lower peak-frequency panel
-    --colorby {re,ca,u}    runs mode colouring (default re)
+    --colorby {re,ca,u,flag}   runs mode colouring (default re). flag: orange = the run has a peak in --region,
+                           grey = no peak, dashed = region not measured (needs --region); the lower panel then
+                           uses --peakx for its x axis
+    --peakx {re,ca,u}      runs mode with --colorby flag: quantity on the x axis of the peak-frequency panel (default re)
+    --region R             runs mode: peak region from angle_metrics.py (170 or r170). With --at peak each run's PSD is
+                           taken at its variance peak INSIDE that window, not at its overall maximum
+    --flag-false {show,grey,hide}   runs mode, needs --region. Runs whose flag is False (measured, no peak in the
+                           region) are drawn as usual (show, default), greyed out behind the others (grey), or left
+                           out (hide). Runs whose region was not measured (blank flag) are never greyed or hidden.
+                           Greyed runs get no peak marker and no point in the peak-frequency panel (their
+                           "peak" would only be the noise floor).
+    --metrics PATH         master_metrics_S<sensor>.csv holding the flags (default: next to master_angles.csv; run
+                           angle_metrics.py --sensor S4 first). Flags come from the |a| variance of that sensor, also
+                           when --component is x, y or z
     --track                map mode: mark the dominant-peak frequency at angles whose variance is >= 3x the median
     --vmin / --vmax        map colour limits (default 1st and 99.9th percentile of the PSD)
     --chord M              average chord for St (default 0.0138)
@@ -73,8 +96,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from plot_angle_sweep import (INK, MUTED, SURFACE, CAT, resolve, short_name, slug, parse_sensors,  # noqa: E402
                               style_axes, conditions_line, save, clip_matrix)
 
+from plot_design_space import FLAG_TRUE, as_flag, pick_regions, region_window    # noqa: E402
+
 AXES = ("x", "y", "z")
 CMAP = "turbo"
+GREY_LINE = "#b5b4ae"       # curves of runs without a peak in the chosen region (greyed or flag-coloured)
 MAX_GAP_DEG = 20.0          # holes in the angle sampling larger than this are left blank in the map
 
 
@@ -149,6 +175,12 @@ def sym_psd(args):
     sub = "|a|" if args.component == "mag" else f"a_{args.component}"
     var = "St" if args.xaxis == "st" else "f"
     num = rf"S_{{{sub}}}({var})"
+    if args.premult:
+        num = rf"{var}\," + num
+        per = "ln St" if args.xaxis == "st" else "ln f"
+        if args.norm == "ac":
+            return rf"${num}\,/\,a_c^2$   (variance per {per})"
+        return rf"${num}$   (g$^2$ per {per})"
     if args.norm == "ac":
         unit = "per unit St" if args.xaxis == "st" else "1/Hz"
         return rf"${num}\,/\,a_c^2$   ({unit})"
@@ -166,6 +198,22 @@ def band_label(args):
 
 def fmt_x(v, args):
     return f"St {v:.3g}" if args.xaxis == "st" else f"{v:.3g} Hz"
+
+
+def y_of(args, x, s):
+    """What is drawn: S, or x*S with --premult (x = f or St, so the plot is per unit ln x)."""
+    return s * x if args.premult else s
+
+
+def set_yaxis(ax, args):
+    if args.ylin:
+        ax.set_yscale("linear")
+        ax.set_ylim(bottom=0)
+    else:
+        ax.set_yscale("log")
+    if args.premult:
+        ax.text(0.995, 0.015, "equal area under the curve = equal variance", transform=ax.transAxes, ha="right",
+                va="bottom", fontsize=8, color=MUTED)
 
 
 # --------------------------------------------------
@@ -275,13 +323,15 @@ def fig_spectra(run, D, info, args, out):
         label = (f"{D['th'][j]:.0f}°" + ("  quiet reference" if kind == "quiet" else "")
                  + f"  ·  nvar {D['nv'][j]:.2g}  ·  peak {fmt_x(x[k], args)}"
                  + ("" if args.xaxis == "freq" else f" ({D['f'][k]:.3g} Hz)"))
-        ax.plot(x[m], s[m], color=col, lw=1.5, ls=ls, label=label, zorder=3)
-        ax.scatter([x[k]], [s[k]], s=34, color=col, edgecolor=SURFACE, linewidth=0.8, zorder=5)
+        sp = y_of(args, x, s)
+        ax.plot(x[m], sp[m], color=col, lw=1.5, ls=ls, label=label, zorder=3)
+        ax.scatter([x[k]], [sp[k]], s=34, color=col, edgecolor=SURFACE, linewidth=0.8, zorder=5)
         rows.append(dict(run_name=run, motor_angle_deg=D["th"][j], kind=kind, nvar=D["nv"][j],
                          peak_hz=D["f"][k], peak_St=D["f"][k] * args.chord / info["velocity_m_s"],
                          peak_psd=s[k], clipped=bool(D["clip"][j])))
         tab[f"psd_{D['th'][j]:.0f}deg"] = D["P"][j]
-    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xscale("log")
+    set_yaxis(ax, args)
     ax.set_xlim(x[m].min(), x[m].max())
     ax.set_xlabel(xlabel(args), color=INK)
     ax.set_ylabel(sym_psd(args), color=INK)
@@ -304,44 +354,100 @@ COLORBY = {"re": ("reynolds_number", "Reynolds number  Re", True),
            "u": ("velocity_m_s", "Freestream velocity U (m/s)", False)}
 
 
-def fig_runs(runs, data, infos, args, out):
-    key, clabel, logc = COLORBY[args.colorby]
+def load_region_flags(summ, args, targets):
+    """(region name, {run: True/False/None}, (lo, hi) or None) from master_metrics_S<sensor>.csv.
+    None = the region was not measured in that run (blank flag), which is not the same as False."""
+    mpath = Path(args.metrics) if args.metrics else summ / f"master_metrics_S{args.sensor_id}.csv"
+    if not mpath.exists():
+        raise SystemExit(f"{mpath} not found; run:  python angle_metrics.py {summ / 'master_angles.csv'} "
+                         f"--sensor S{args.sensor_id}  (or pass --metrics)")
+    m = pd.read_csv(mpath)
+    name = pick_regions(m, [args.region], mpath)[0]
+    m[f"flag_{name}"] = as_flag(m[f"flag_{name}"])
+    f = m.set_index("run_name")[f"flag_{name}"]
+    flags = {r: (None if r not in f.index or pd.isna(f[r]) else bool(f[r])) for r in targets}
+    missing = [r for r in targets if r not in f.index]
+    if missing:
+        print(f"WARNING: no flags in {mpath.name} for: {', '.join(missing)} (treated as not measured)")
+    if "baseline_reliable" in m.columns:
+        unrel = [r for r in targets if r in f.index and m.set_index("run_name").loc[r, "baseline_reliable"] == False]  # noqa: E712
+        if unrel:
+            print("WARNING: own-median baseline unreliable (partial sweep), so these flags are not trustworthy "
+                  "until angle_metrics.py gets --baseline-file:\n  " + "\n  ".join(unrel))
+    return name, flags, region_window(m, name)
+
+
+def run_style(args, fl, v, cmap, norm):
+    """(colour, linewidth, linestyle, zorder, greyed) of one run's curve."""
+    if args.colorby == "flag":
+        if fl is True:
+            return FLAG_TRUE, 1.6, "-", 4, False
+        if fl is False:
+            return GREY_LINE, 1.1, "-", 2, True
+        return MUTED, 1.2, (0, (4, 3)), 3, False
+    if args.flag_false == "grey" and fl is False:
+        return GREY_LINE, 1.1, "-", 2, True
+    return cmap(norm(v)), 1.4, "-", 3, False
+
+
+def fig_runs(runs, data, infos, args, out, flags=None, window=None):
+    by_flag = args.colorby == "flag"
+    key, clabel, logc = COLORBY[args.peakx if by_flag else args.colorby]
     vals = np.array([infos[r][key] for r in runs], float)
     order = np.argsort(vals)
     runs, vals = [runs[i] for i in order], vals[order]
     norm = (LogNorm if logc else Normalize)(vals.min(), vals.max() if vals.max() > vals.min() else vals.min() * 1.01)
     cmap = plt.get_cmap(CMAP)
     show_pk = not args.no_peak
+    wr = [1] if by_flag else [1, 0.025]
+    cax = None
     if show_pk:
         fig = plt.figure(figsize=(11, 8.2), facecolor=SURFACE, constrained_layout=True)
-        gs = fig.add_gridspec(2, 2, height_ratios=[2.2, 1], width_ratios=[1, 0.025])
+        gs = fig.add_gridspec(2, len(wr), height_ratios=[2.2, 1], width_ratios=wr)
         ax = fig.add_subplot(gs[0, 0])
         axp = fig.add_subplot(gs[1, 0])
-        cax = fig.add_subplot(gs[:, 1])
+        if not by_flag:
+            cax = fig.add_subplot(gs[:, 1])
     else:
         fig = plt.figure(figsize=(11, 5.8), facecolor=SURFACE, constrained_layout=True)
-        gs = fig.add_gridspec(1, 2, width_ratios=[1, 0.025])
+        gs = fig.add_gridspec(1, len(wr), width_ratios=wr)
         ax = fig.add_subplot(gs[0, 0])
-        cax = fig.add_subplot(gs[0, 1])
-    rows, angs = [], []
+        if not by_flag:
+            cax = fig.add_subplot(gs[0, 1])
+    rows, angs, used = [], [], []
     for r, v in zip(runs, vals):
         D, info = data[r], infos[r]
+        fl = flags.get(r) if flags else None
         x, S = transform(D, info, args, args.smooth)
         m = band(D, args)
-        j = (int(np.argmax(np.where(np.isfinite(D["nv"]), D["nv"], -np.inf))) if args.at == "peak"
-             else int(np.argmin(np.abs(D["th"] - float(args.at)))))
+        if args.at == "peak" and window:
+            inw = (D["th"] >= window[0]) & (D["th"] <= window[1]) & np.isfinite(D["nv"])
+            if not inw.any():
+                print(f"NOTE: {r}: no measured angle in the {window[0]:g}-{window[1]:g} deg window; left out")
+                continue
+            j = int(np.flatnonzero(inw)[np.argmax(D["nv"][inw])])
+        elif args.at == "peak":
+            j = int(np.argmax(np.where(np.isfinite(D["nv"]), D["nv"], -np.inf)))
+        else:
+            j = int(np.argmin(np.abs(D["th"] - float(args.at))))
         s = S[j]
         k = np.where(m)[0][np.argmax(s[m])]
-        col = cmap(norm(v))
-        ax.plot(x[m], s[m], color=col, lw=1.4, zorder=3)
+        col, lw, ls, z, grey = run_style(args, fl, v, cmap, norm)
+        sp = y_of(args, x, s)
+        ax.plot(x[m], sp[m], color=col, lw=lw, ls=ls, zorder=z)
         angs.append(D["th"][j])
-        if show_pk:
-            ax.scatter([x[k]], [s[k]], s=26, color=col, edgecolor=INK, linewidth=0.6, zorder=5)
-            axp.scatter([v], [x[k]], s=46, color=col, edgecolor=INK, linewidth=0.7, zorder=4)
+        used.append((fl, grey))
+        if show_pk and not grey:      # a run with no peak in the region has no peak frequency (it would be the noise-floor edge)
+            ax.scatter([x[k]], [sp[k]], s=26, color=col, edgecolor=INK, linewidth=0.6, zorder=z + 2)
+            axp.scatter([v], [x[k]], s=46, color=col, edgecolor=INK, linewidth=0.7, zorder=z + 1)
         rows.append(dict(run_name=r, colorby=args.colorby, value=v, motor_angle_deg=D["th"][j], nvar=D["nv"][j],
                          peak_hz=D["f"][k], peak_St=D["f"][k] * args.chord / info["velocity_m_s"], peak_psd=s[k],
-                         clipped=bool(D["clip"][j])))
-    ax.set_xscale("log"); ax.set_yscale("log")
+                         clipped=bool(D["clip"][j]), region=args.region_name if flags else "",
+                         flag="" if fl is None else fl))
+    if not used:
+        raise SystemExit("no runs left to plot")
+    ax.set_xscale("log")
+    set_yaxis(ax, args)
     ax.set_xlabel(xlabel(args), color=INK)
     ax.set_ylabel(sym_psd(args), color=INK)
     style_axes(ax)
@@ -349,23 +455,42 @@ def fig_runs(runs, data, infos, args, out):
     lo, hi = min(angs), max(angs)
     span = f"{lo:g}°" if np.isclose(lo, hi, atol=0.05) else f"{lo:g}° to {hi:g}°"
     if args.at == "peak":
-        where = f"at each run's variance-peak angle ({span})"
+        inside = f" inside {window[0]:g}–{window[1]:g}°" if window else ""
+        where = f"at each run's variance-peak angle{inside} ({span})"
     else:
         where = f"at motor angle {float(args.at):g}°" + ("" if span == f"{float(args.at):g}°"
                                                          else f" (nearest measured: {span})")
-    ax.set_title(f"S{args.sensor_id} {band_label(args)}   ·   PSD {where}   ·   {len(runs)} runs", loc="left",
-                 fontsize=11, color=INK)
+    note = ""
+    if flags:
+        nt = sum(f is True for f, _ in used)
+        note = f"   ·   region {args.region_name}: {nt} of {len(used)} runs with a peak"
+    ax.set_title(f"S{args.sensor_id} {band_label(args)}   ·   PSD {where}   ·   {len(used)} runs" + note,
+                 loc="left", fontsize=11, color=INK)
+    handles = []
+    if by_flag:
+        n_t = sum(f is True for f, _ in used)
+        n_f = sum(f is False for f, _ in used)
+        handles = [Line2D([], [], color=FLAG_TRUE, lw=2.2, label=f"peak in region ({n_t})"),
+                   Line2D([], [], color=GREY_LINE, lw=2.2, label=f"no peak ({n_f})")]
+        if any(f is None for f, _ in used):
+            handles.append(Line2D([], [], color=MUTED, lw=1.6, ls=(0, (4, 3)),
+                                  label=f"region not measured ({sum(f is None for f, _ in used)})"))
+    elif any(g for _, g in used):
+        handles = [Line2D([], [], color=GREY_LINE, lw=2.2, label=f"no peak in region ({sum(g for _, g in used)})")]
+    if handles:
+        ax.legend(handles=handles, loc="best", frameon=False, fontsize=9, labelcolor=INK)
     if show_pk:
         if logc:
             axp.set_xscale("log")
         axp.set_xlabel(clabel, color=INK)
         axp.set_ylabel("Peak St" if args.xaxis == "st" else "Peak frequency (Hz)", color=INK)
         style_axes(axp)
-    sm = ScalarMappable(norm=norm, cmap=cmap)
-    cb = fig.colorbar(sm, cax=cax)
-    cb.set_label(clabel, color=INK)
-    cb.ax.tick_params(colors=MUTED)
-    cb.outline.set_edgecolor(MUTED)
+    if cax is not None:
+        sm = ScalarMappable(norm=norm, cmap=cmap)
+        cb = fig.colorbar(sm, cax=cax)
+        cb.set_label(clabel, color=INK)
+        cb.ax.tick_params(colors=MUTED)
+        cb.outline.set_edgecolor(MUTED)
     save(fig, out, args.dpi)
     pd.DataFrame(rows).to_csv(out.with_suffix(".csv"), index=False)
 
@@ -383,6 +508,8 @@ def main():
     ap.add_argument("--component", choices=["mag", "x", "y", "z"], default="mag")
     ap.add_argument("--xaxis", choices=["freq", "st"], default="freq")
     ap.add_argument("--norm", choices=["ac", "raw"], default="ac")
+    ap.add_argument("--premult", action="store_true")
+    ap.add_argument("--yscale", choices=["log", "linear"])
     ap.add_argument("--fmin", type=float, default=5.0)
     ap.add_argument("--fmax", type=float, default=500.0)
     ap.add_argument("--flog", action="store_true")
@@ -391,7 +518,11 @@ def main():
     ap.add_argument("--npeaks", type=int, default=3)
     ap.add_argument("--sep", type=float, default=15.0)
     ap.add_argument("--at", default="peak")
-    ap.add_argument("--colorby", choices=list(COLORBY), default="re")
+    ap.add_argument("--colorby", choices=list(COLORBY) + ["flag"], default="re")
+    ap.add_argument("--peakx", choices=list(COLORBY), default="re")
+    ap.add_argument("--region", help="peak region from angle_metrics.py, e.g. 170 or r170 (runs mode)")
+    ap.add_argument("--flag-false", choices=["show", "grey", "hide"], default="show")
+    ap.add_argument("--metrics", help="master_metrics_S<sensor>.csv with the region flags")
     ap.add_argument("--no-peak", action="store_true",
                     help="runs mode: do not mark or plot the dominant peak frequency (PSD curves only)")
     ap.add_argument("--track", action="store_true")
@@ -402,6 +533,9 @@ def main():
     ap.add_argument("--dpi", type=int, default=200)
     args = ap.parse_args()
 
+    args.ylin = (args.yscale or ("linear" if args.premult else "log")) == "linear"
+    if args.mode == "map" and (args.premult or args.yscale):
+        raise SystemExit("--premult and --yscale apply to --mode spectra and runs (map shows the PSD as colour)")
     summ = Path(args.summaries)
     summ = summ.parent if summ.is_file() else summ
     runs_csv = summ / "master_runs.csv"
@@ -420,19 +554,36 @@ def main():
                 raise SystemExit(f"{r}: no measured {k} in master_runs.csv (needed for normalization / St)")
     infos = {r: rdf.loc[r].to_dict() for r in targets}
     tag = comp_tag(args) + ("_st" if args.xaxis == "st" else "") + ("_raw" if args.norm == "raw" else "")
+    tag += "_premult" if args.premult else ""
+    if args.ylin != args.premult:
+        tag += "_lin" if args.ylin else "_logy"
+
+    flags, window = None, None
+    if args.colorby == "flag" or args.flag_false != "show":
+        if not args.region:
+            raise SystemExit("--colorby flag and --flag-false need --region (e.g. --region 170)")
+    if args.region:
+        if args.mode != "runs":
+            raise SystemExit("--region, --colorby flag and --flag-false apply to --mode runs")
+        args.region_name, flags, window = load_region_flags(summ, args, targets)
+        if args.flag_false == "hide":
+            dropped = [r for r in targets if flags[r] is False]
+            targets = [r for r in targets if flags[r] is not False]
+            print(f"--flag-false hide: left out {len(dropped)} run(s) with no peak in {args.region_name}: "
+                  + (", ".join(dropped) if dropped else "none"))
 
     if args.mode == "runs":
         if len(targets) < 2:
             raise SystemExit("--mode runs needs several datasets (e.g. --run 704psi or --run all)")
         data = {r: load_run(summ, r, args.sensor_id, args.component) for r in targets}
         at = "atpeak" if args.at == "peak" else f"at{float(args.at):g}deg"
-        name = f"psd_runs_{args.colorby}_{'all' if batch else '_'.join(slug(r) for r in targets)}_{at}_{tag}"
-        if args.no_peak:
-            name += "_nopeak"
+        extra = (f"_{args.region_name}" + {"grey": "_grey", "hide": "_hide"}.get(args.flag_false, "")
+                 if flags is not None else "") + ("_nopeak" if args.no_peak else "")
+        name = f"psd_runs_{args.colorby}_{'all' if batch else '_'.join(slug(r) for r in targets)}_{at}_{tag}{extra}"
         if len(name) > 150:
-            name = f"psd_runs_{args.colorby}_{len(targets)}runs_{at}_{tag}" + ("_nopeak" if args.no_peak else "")
+            name = f"psd_runs_{args.colorby}_{len(targets)}runs_{at}_{tag}{extra}"
         png = out / f"{name}.png"
-        fig_runs(targets, data, infos, args, png)
+        fig_runs(targets, data, infos, args, png, flags, window)
         print(f"Wrote {png}  (+ .csv table)")
         return
     for r in targets:
