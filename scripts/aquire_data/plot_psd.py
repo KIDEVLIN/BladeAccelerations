@@ -38,6 +38,12 @@ Options
                            so areas under curves still equal variances.
     --norm {ac,raw}        ac (default): PSD / a_c^2, so runs at different conditions are comparable
                            (same normalization as the variance plots); raw: g^2/Hz (g^2 per unit St)
+    --premult              spectra and runs modes: plot f*S(f) (St*S(St) with --xaxis st) on a LINEAR y axis against the
+                           log frequency axis. Because  integral S df = integral f*S d(ln f), equal areas under the curve
+                           now mean equal variance (energy), so the peaks can be compared by eye; on the log-log plot
+                           they cannot. The quantity is per unit ln f (normalized: dimensionless). Peak markers and the
+                           peak frequencies still come from the plain PSD S(f), not from f*S
+    --yscale {log,linear}  y axis of the spectra and runs modes (default log, or linear with --premult)
     --fmin / --fmax        frequency range shown and searched for peaks (Hz; default 5 .. 500)
     --flog                 log frequency axis (map: vertical axis; spectra/runs: x axis is always log)
     --smooth N             moving average over N frequency bins before plotting/peak picking in the
@@ -169,6 +175,12 @@ def sym_psd(args):
     sub = "|a|" if args.component == "mag" else f"a_{args.component}"
     var = "St" if args.xaxis == "st" else "f"
     num = rf"S_{{{sub}}}({var})"
+    if args.premult:
+        num = rf"{var}\," + num
+        per = "ln St" if args.xaxis == "st" else "ln f"
+        if args.norm == "ac":
+            return rf"${num}\,/\,a_c^2$   (variance per {per})"
+        return rf"${num}$   (g$^2$ per {per})"
     if args.norm == "ac":
         unit = "per unit St" if args.xaxis == "st" else "1/Hz"
         return rf"${num}\,/\,a_c^2$   ({unit})"
@@ -186,6 +198,22 @@ def band_label(args):
 
 def fmt_x(v, args):
     return f"St {v:.3g}" if args.xaxis == "st" else f"{v:.3g} Hz"
+
+
+def y_of(args, x, s):
+    """What is drawn: S, or x*S with --premult (x = f or St, so the plot is per unit ln x)."""
+    return s * x if args.premult else s
+
+
+def set_yaxis(ax, args):
+    if args.ylin:
+        ax.set_yscale("linear")
+        ax.set_ylim(bottom=0)
+    else:
+        ax.set_yscale("log")
+    if args.premult:
+        ax.text(0.995, 0.015, "equal area under the curve = equal variance", transform=ax.transAxes, ha="right",
+                va="bottom", fontsize=8, color=MUTED)
 
 
 # --------------------------------------------------
@@ -295,13 +323,15 @@ def fig_spectra(run, D, info, args, out):
         label = (f"{D['th'][j]:.0f}°" + ("  quiet reference" if kind == "quiet" else "")
                  + f"  ·  nvar {D['nv'][j]:.2g}  ·  peak {fmt_x(x[k], args)}"
                  + ("" if args.xaxis == "freq" else f" ({D['f'][k]:.3g} Hz)"))
-        ax.plot(x[m], s[m], color=col, lw=1.5, ls=ls, label=label, zorder=3)
-        ax.scatter([x[k]], [s[k]], s=34, color=col, edgecolor=SURFACE, linewidth=0.8, zorder=5)
+        sp = y_of(args, x, s)
+        ax.plot(x[m], sp[m], color=col, lw=1.5, ls=ls, label=label, zorder=3)
+        ax.scatter([x[k]], [sp[k]], s=34, color=col, edgecolor=SURFACE, linewidth=0.8, zorder=5)
         rows.append(dict(run_name=run, motor_angle_deg=D["th"][j], kind=kind, nvar=D["nv"][j],
                          peak_hz=D["f"][k], peak_St=D["f"][k] * args.chord / info["velocity_m_s"],
                          peak_psd=s[k], clipped=bool(D["clip"][j])))
         tab[f"psd_{D['th'][j]:.0f}deg"] = D["P"][j]
-    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xscale("log")
+    set_yaxis(ax, args)
     ax.set_xlim(x[m].min(), x[m].max())
     ax.set_xlabel(xlabel(args), color=INK)
     ax.set_ylabel(sym_psd(args), color=INK)
@@ -403,11 +433,12 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
         s = S[j]
         k = np.where(m)[0][np.argmax(s[m])]
         col, lw, ls, z, grey = run_style(args, fl, v, cmap, norm)
-        ax.plot(x[m], s[m], color=col, lw=lw, ls=ls, zorder=z)
+        sp = y_of(args, x, s)
+        ax.plot(x[m], sp[m], color=col, lw=lw, ls=ls, zorder=z)
         angs.append(D["th"][j])
         used.append((fl, grey))
         if show_pk and not grey:      # a run with no peak in the region has no peak frequency (it would be the noise-floor edge)
-            ax.scatter([x[k]], [s[k]], s=26, color=col, edgecolor=INK, linewidth=0.6, zorder=z + 2)
+            ax.scatter([x[k]], [sp[k]], s=26, color=col, edgecolor=INK, linewidth=0.6, zorder=z + 2)
             axp.scatter([v], [x[k]], s=46, color=col, edgecolor=INK, linewidth=0.7, zorder=z + 1)
         rows.append(dict(run_name=r, colorby=args.colorby, value=v, motor_angle_deg=D["th"][j], nvar=D["nv"][j],
                          peak_hz=D["f"][k], peak_St=D["f"][k] * args.chord / info["velocity_m_s"], peak_psd=s[k],
@@ -415,7 +446,8 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
                          flag="" if fl is None else fl))
     if not used:
         raise SystemExit("no runs left to plot")
-    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xscale("log")
+    set_yaxis(ax, args)
     ax.set_xlabel(xlabel(args), color=INK)
     ax.set_ylabel(sym_psd(args), color=INK)
     style_axes(ax)
@@ -476,6 +508,8 @@ def main():
     ap.add_argument("--component", choices=["mag", "x", "y", "z"], default="mag")
     ap.add_argument("--xaxis", choices=["freq", "st"], default="freq")
     ap.add_argument("--norm", choices=["ac", "raw"], default="ac")
+    ap.add_argument("--premult", action="store_true")
+    ap.add_argument("--yscale", choices=["log", "linear"])
     ap.add_argument("--fmin", type=float, default=5.0)
     ap.add_argument("--fmax", type=float, default=500.0)
     ap.add_argument("--flog", action="store_true")
@@ -499,6 +533,9 @@ def main():
     ap.add_argument("--dpi", type=int, default=200)
     args = ap.parse_args()
 
+    args.ylin = (args.yscale or ("linear" if args.premult else "log")) == "linear"
+    if args.mode == "map" and (args.premult or args.yscale):
+        raise SystemExit("--premult and --yscale apply to --mode spectra and runs (map shows the PSD as colour)")
     summ = Path(args.summaries)
     summ = summ.parent if summ.is_file() else summ
     runs_csv = summ / "master_runs.csv"
@@ -517,6 +554,9 @@ def main():
                 raise SystemExit(f"{r}: no measured {k} in master_runs.csv (needed for normalization / St)")
     infos = {r: rdf.loc[r].to_dict() for r in targets}
     tag = comp_tag(args) + ("_st" if args.xaxis == "st" else "") + ("_raw" if args.norm == "raw" else "")
+    tag += "_premult" if args.premult else ""
+    if args.ylin != args.premult:
+        tag += "_lin" if args.ylin else "_logy"
 
     flags, window = None, None
     if args.colorby == "flag" or args.flag_false != "show":
