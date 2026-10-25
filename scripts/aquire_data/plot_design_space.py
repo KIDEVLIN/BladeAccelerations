@@ -19,6 +19,8 @@ Usage (from scripts/aquire_data):
     python plot_design_space.py Production_summaries/master_runs.csv --panels p90,excess,width --no-labels
     python plot_design_space.py Production_summaries/master_runs.csv --sensor S4              # S4 only
     python plot_design_space.py Production_summaries/master_runs.csv --sensor S4 --panels p90,excess
+    python plot_design_space.py Production_summaries/master_runs.csv --sensor S4 --flag 170        # one peak region
+    python plot_design_space.py Production_summaries/master_runs.csv --sensor S4 --flag all        # one panel per region
 
 Options
     --panels LIST       comma-separated metrics, one panel each (default max,p90; "both" = max,p90)
@@ -29,6 +31,12 @@ Options
                                   bound for partial ones): the recommended cross-run metric
                           width   vibrating width in degrees, i.e. angle range where the variance
                                   exceeds k x baseline (k is set in angle_metrics.py)
+    --flag REGION [...] plot the peak flag of one or more regions INSTEAD of the metric panels (no colorbar):
+                        one panel per region, each point is True (peak: the largest variance in that
+                        angle window is >= k x baseline) or False (measured, no peak). REGION is a name
+                        or centre angle from angle_metrics.py (r170 or 170), or "all". Needs
+                        master_metrics.csv (master_metrics_S4.csv with --sensor S4) from angle_metrics.py,
+                        which sets the windows, the baseline and k.
     --p90 {count,weighted}
                         count (default): plain percentile, every measured angle counts equally
                         weighted: each angle counts by the span of motor angle it represents
@@ -54,6 +62,8 @@ Outputs (in --out, default <master_runs folder>/figures):
 
 Encoding
     color  = the metric of each panel
+    flag panels (--flag): filled orange = peak in that region, light grey = no peak, hollow dashed =
+             region not measured (partial sweep), so neither True nor False
     shape  = square if at least one angle of that run had accelerometer clipping (the metric is
              then a LOWER BOUND), circle otherwise
     dashed ring (excess and width panels) = partial sweep, the metric is a LOWER BOUND
@@ -93,6 +103,8 @@ METRICS = {
 
 NEEDED = ["run_name", "nominal_psi", "fan_setting", "version", "reynolds_number",
           "cauchy_edgewise", "nvar_max", "nvar_p90", "n_accel_clipped"]
+FLAG_TRUE, FLAG_FALSE = "#d55e00", "#dcdbd6"     # peak (vermillion) vs no peak (light grey)
+REGION_COL = re.compile(r"^(flag|max|angle|ratio)_(r-?\d+)$")
 FROM_METRICS = ["excess_mean_full", "vibrating_width_deg", "nvar_p90_weighted", "full_sweep",
                 "baseline", "baseline_reliable", "threshold"]
 
@@ -148,7 +160,44 @@ def apply_sensor(df, angles_path, sid):
 def merge_metrics(df, path):
     m = pd.read_csv(path)
     keep = ["run_name"] + [c for c in FROM_METRICS if c in m.columns]
+    keep += [c for c in m.columns if REGION_COL.match(c) or c in ("regions", "n_peak_regions")]
     return df.merge(m[keep], on="run_name", how="left")
+
+
+def as_flag(series):
+    """True / False / <NA> (region not measured) from the csv column, whatever dtype it was read as."""
+    return series.map({True: True, False: False, "True": True, "False": False}).astype("boolean")
+
+
+def region_names(df):
+    return [c[len("flag_"):] for c in df.columns if c.startswith("flag_") and REGION_COL.match(c)]
+
+
+def pick_regions(df, wanted, mpath):
+    have = region_names(df)
+    if not have:
+        raise SystemExit(f"{mpath} has no flag_<region> columns; rerun angle_metrics.py (region flags version)")
+    if [w.lower() for w in wanted] == ["all"]:
+        return have
+    out = []
+    for w in wanted:
+        name = w if w.startswith("r") else f"r{w}"
+        if name not in have:
+            raise SystemExit(f"--flag {w!r}: no such region; {mpath} has {have}")
+        out.append(name)
+    return out
+
+
+def region_window(df, name):
+    """(lo, hi) of a region from the 'regions' column written by angle_metrics.py, or None."""
+    if "regions" not in df.columns:
+        return None
+    for txt in df["regions"].dropna().unique():
+        for part in str(txt).split(";"):
+            if part.startswith(name + "="):
+                lo, hi = part.split("=")[1].split(":")
+                return float(lo), float(hi)
+    return None
 
 
 def condition_labels(df):
@@ -170,8 +219,28 @@ def condition_labels(df):
 # Drawing
 # --------------------------------------------------
 
-def draw(ax, df, metric, title, norm, labels=True, ylabel=True, partial_ring=False):
-    for clipped, marker, size in ((False, "o", 150), (True, "s", 150)):
+def draw_flags(ax, df, col, size=150):
+    """Categorical markers: peak (orange), no peak (grey), region not measured (hollow, dashed)."""
+    f = df[col]
+    for clipped, marker in ((False, "o"), (True, "s")):
+        sel = (df["clipped"] == clipped).to_numpy()
+        for mask, fc in ((f.eq(False), FLAG_FALSE), (f.eq(True), FLAG_TRUE)):      # peak drawn on top
+            d = df[sel & mask.fillna(False).to_numpy(bool)]
+            if len(d):
+                ax.scatter(d["reynolds_number"], d["cauchy_edgewise"], facecolor=fc, marker=marker, s=size,
+                           edgecolor=SURFACE, linewidth=1.6, zorder=3 if fc == FLAG_FALSE else 4)
+                ax.scatter(d["reynolds_number"], d["cauchy_edgewise"], facecolor="none", marker=marker,
+                           s=size + 55, edgecolor=INK, linewidth=0.7, zorder=2)
+        d = df[sel & f.isna().to_numpy(bool)]
+        if len(d):
+            ax.scatter(d["reynolds_number"], d["cauchy_edgewise"], facecolor="none", marker=marker, s=size + 30,
+                       edgecolor=MUTED, linewidth=1.2, linestyle=(0, (2.5, 2)), zorder=3)
+
+
+def draw(ax, df, metric, title, norm, labels=True, ylabel=True, partial_ring=False, flag=False):
+    if flag:
+        draw_flags(ax, df, metric)
+    for clipped, marker, size in (() if flag else ((False, "o", 150), (True, "s", 150))):
         d = df[(df["clipped"] == clipped)].dropna(subset=[metric])
         if len(d):
             ax.scatter(d["reynolds_number"], d["cauchy_edgewise"], c=d[metric], cmap=CMAP,
@@ -253,6 +322,53 @@ def place_labels(fig, ax):
         placed.append(best)
 
 
+def flag_figure(df, regions, sid, args, out):
+    """One design-space panel per region, points colored by that region's peak flag (no colorbar)."""
+    have_thr = {"threshold", "baseline"} <= set(df.columns)
+    k = float((df["threshold"] / df["baseline"]).median()) if have_thr else 10.0
+    n = len(regions)
+    fig, axes = plt.subplots(1, n, figsize=(6.6 * n, 6.4), sharex=True, sharey=True, facecolor=SURFACE,
+                             constrained_layout=True, squeeze=False)
+    axes = list(axes[0])
+    for i, (ax, r) in enumerate(zip(axes, regions)):
+        f = df[f"flag_{r}"]
+        nt, nf, nu = int(f.eq(True).sum()), int(f.eq(False).sum()), int(f.isna().sum())
+        w = region_window(df, r)
+        title = (f"Peak in {w[0]:g}–{w[1]:g}° motor angle" if w else f"Peak region {r}") \
+            + (f" (S{sid})" if sid else "") \
+            + f"\n{nt} of {nt + nf} measured runs flagged" + (f", {nu} not measured" if nu else "")
+        draw(ax, df, f"flag_{r}", title, None, labels=(not args.no_labels and i == 0), ylabel=(i == 0), flag=True)
+    handles = [
+        Line2D([], [], marker="o", ls="", ms=9, mfc=FLAG_TRUE, mec=INK, mew=0.7,
+               label=f"peak (max in window ≥ {k:g} × baseline)"),
+        Line2D([], [], marker="o", ls="", ms=9, mfc=FLAG_FALSE, mec=INK, mew=0.7, label="no peak"),
+    ]
+    if any(df[f"flag_{r}"].isna().any() for r in regions):
+        handles.append(Line2D([], [], marker="o", ls="", ms=9, mfc="none", mec=MUTED, mew=1.2,
+                              label="region not measured"))
+    if df["clipped"].any():
+        handles.append(Line2D([], [], marker="s", ls="", ms=9, mfc="#bdbdb8", mec=INK, mew=0.7,
+                              label=f"square: ≥1 angle with {'S%d ' % sid if sid else ''}clipped (variance is a lower bound)"))
+    axes[0].legend(handles=handles, loc="upper left", frameon=False, fontsize=8.5, labelcolor=INK)
+    if not args.no_labels:
+        place_labels(fig, axes[0])
+    name = "design_space_flag_" + "_".join(regions) + (f"_S{sid}" if sid else "") + \
+        ("_fullonly" if args.full_only else "")
+    png = out / f"{name}.png"
+    fig.savefig(png, dpi=args.dpi, facecolor=SURFACE)
+    plt.close(fig)
+
+    cols = ["run_name", "reynolds_number", "cauchy_edgewise"] + \
+        [f"{kind}_{r}" for r in regions for kind in ("flag", "ratio", "max", "angle")] + \
+        ["n_peak_regions", "baseline", "full_sweep", "n_accel_clipped"]
+    table = df.sort_values(["reynolds_number", "cauchy_edgewise"])[[c for c in cols if c in df.columns]]
+    tpath = out / (f"design_space_flag_table_S{sid}.csv" if sid else "design_space_flag_table.csv")
+    table.to_csv(tpath, index=False)
+    show = ["run_name"] + [f"flag_{r}" for r in regions] + [f"ratio_{r}" for r in regions]
+    print(table[[c for c in show if c in table.columns]].to_string(index=False, float_format=lambda v: f"{v:.3g}"))
+    print(f"\nWrote {png}\n      {tpath}")
+
+
 def make_norm(values, kind, scale):
     v = pd.concat(values).dropna()
     if kind == "width" or scale == "linear":
@@ -275,6 +391,8 @@ def main():
     ap.add_argument("--dpi", type=int, default=200)
     ap.add_argument("--panels", default="max,p90",
                     help="comma-separated: max, p90, excess, width (default max,p90)")
+    ap.add_argument("--flag", nargs="+", metavar="REGION",
+                    help="plot the peak flag of these regions (e.g. 170 or r170; 'all') instead of the metric panels")
     ap.add_argument("--p90", choices=["count", "weighted"], default="count")
     ap.add_argument("--cbar", choices=["log", "linear"], default="log")
     ap.add_argument("--separate-cbars", action="store_true")
@@ -284,7 +402,9 @@ def main():
 
     panels = ["max", "p90"] if args.panels == "both" else [p.strip() for p in args.panels.split(",") if p.strip()]
     bad = [p for p in panels if p not in METRICS]
-    if bad or not panels:
+    if args.flag:
+        panels, bad = [], []
+    if bad or (not panels and not args.flag):
         raise SystemExit(f"--panels must be a comma-separated list of {list(METRICS)}; got {args.panels!r}")
 
     src = Path(args.master_runs)
@@ -301,7 +421,7 @@ def main():
 
     # metrics that depend on the chosen sensor (weighted p90, excess, width) vs the sweep coverage only
     needs_sensor_metrics = (args.p90 == "weighted" and "p90" in panels
-                            or any(p in ("excess", "width") for p in panels))
+                            or any(p in ("excess", "width") for p in panels) or bool(args.flag))
     needs_metrics = needs_sensor_metrics or args.full_only
     mname = f"master_metrics_S{sid}.csv" if sid else "master_metrics.csv"
     mpath = Path(args.metrics) if args.metrics else src.parent / mname
@@ -313,6 +433,12 @@ def main():
             hint = f"python angle_metrics.py {src.parent / 'master_angles.csv'}" + (f" --sensor S{sid}" if sid else "")
             raise SystemExit(f"{mpath} not found; run:  {hint}  (or pass --metrics)")
         df = merge_metrics(df, mpath)
+
+    regions = []
+    if args.flag:
+        regions = pick_regions(df, args.flag, mpath)
+        for r in regions:
+            df[f"flag_{r}"] = as_flag(df[f"flag_{r}"])
 
     if args.full_only:
         keep = df["full_sweep"] == True                                              # noqa: E712
@@ -331,15 +457,19 @@ def main():
         df["nvar_p90"] = df["nvar_p90_weighted"]
         titles["p90"] = titles["p90"].replace(" (S", " (weighted by angular span, S", 1) if sid \
             else titles["p90"] + " (weighted by angular span)"
-    if any(p in ("excess", "width") for p in panels) and "baseline_reliable" in df.columns:
+    if (any(p in ("excess", "width") for p in panels) or regions) and "baseline_reliable" in df.columns:
         unrel = df.loc[df["baseline_reliable"] == False, "run_name"].tolist()        # noqa: E712
         if unrel:
             print("WARNING: these runs have an unreliable own-median baseline (partial sweep); "
-                  "excess/width are not trustworthy until you pass --baseline-file to angle_metrics.py:\n  "
+                  "excess/width/flags are not trustworthy until you pass --baseline-file to angle_metrics.py:\n  "
                   + "\n  ".join(unrel))
     if "width" in panels and {"threshold", "baseline"} <= set(df.columns):
         k = (df["threshold"] / df["baseline"]).median()
         titles["width"] = f"Vibrating width (variance > {k:g} × baseline)" + (f" (S{sid})" if sid else "")
+
+    if regions:
+        flag_figure(df, regions, sid, args, out)
+        return
 
     # panels of the same kind (max/p90) share one norm and colorbar unless --separate-cbars
     groups = {}
