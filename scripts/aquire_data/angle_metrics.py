@@ -12,6 +12,8 @@ Usage (from scripts/aquire_data):
     python angle_metrics.py Production_summaries/master_angles.csv --baseline 0.001   # fixed floor
     python angle_metrics.py Production_summaries/master_angles.csv --baseline-file baselines.csv
     python angle_metrics.py Production_summaries/master_angles.csv --sensor S4
+    python angle_metrics.py Production_summaries/master_angles.csv --regions 120 170 210 250 --region-halfwidth 15
+    python angle_metrics.py Production_summaries/master_angles.csv --regions 105:135 160:180   # explicit windows
 
 Output: master_metrics.csv next to master_angles.csv (one row per run). With --sensor S4 the output is
 master_metrics_S4.csv (the form plot_design_space.py --sensor S4 looks for).
@@ -46,6 +48,22 @@ Metrics
                       (a gap >= 10 deg next to the peak, so a narrow peak could be cut)
   coverage_deg / coverage_frac / max_gap_deg / full_sweep / baseline_reliable
 
+Peak-region flags (one set of columns per region; regions are fixed angle windows, default 120, 170 and
+210 deg, each +-15 deg, because the measured peak wanders by about +-10 deg from test to test)
+  flag_r120           True if the largest measured variance inside the window is >= k * baseline (k = --k,
+                      default 10, i.e. an order of magnitude above the quiet level; the same threshold as
+                      vibrating_width_deg / --bands). False if the window was measured and stayed below it.
+                      Blank if no angle was measured inside the window (partial sweep): unmeasured is NOT
+                      the same as "no peak", so plots must not treat blank as False.
+  max_r120            largest measured variance in the window
+  angle_r120          angle of that sample
+  ratio_r120          max_r120 / baseline
+  regions             the windows used, e.g. "r120=105:135;r170=155:185;r210=195:225"
+  n_peak_regions      number of regions flagged True
+Region names come from the window centre (r120, r170, ...). Add or move regions with --regions; nothing
+downstream is hard-coded to three. Only measured samples count (no interpolation), so a narrow peak that
+fell between two angles is still missed; check peak_maybe_unresolved.
+
 --decimate STEP re-computes the dose, width and mean using only angles on a STEP-degree grid
 (same baseline) and reports the ratio to the full-density value, a direct test of sampling
 sensitivity. Ratios near 1 mean the metric does not depend on the extra angles.
@@ -61,6 +79,11 @@ import numpy as np
 import pandas as pd
 
 PEAK_GAP_WARN_DEG = 10.0
+
+# Peak regions (motor angle, deg): window centres and the half-width around each. Peaks move about
+# +-10 deg between tests, so 15 deg leaves margin while keeping neighbouring windows (40 deg apart) apart.
+DEFAULT_REGIONS = ["120", "170", "210"]
+DEFAULT_HALFWIDTH_DEG = 15.0
 
 
 # --------------------------------------------------
@@ -163,6 +186,50 @@ def curve_metrics(t, f, b, thr, max_gap):
     )
 
 
+def parse_regions(tokens, halfwidth):
+    """Region windows [(name, lo, hi)] from tokens such as '120' (centre +- halfwidth) or '105:135'."""
+    out = []
+    for tok in tokens:
+        if ":" in str(tok):
+            lo, hi = (float(v) for v in str(tok).split(":"))
+        else:
+            c = float(tok)
+            lo, hi = c - halfwidth, c + halfwidth
+        if hi <= lo:
+            raise SystemExit(f"--regions {tok!r}: window needs lo < hi")
+        out.append((f"r{int(round((lo + hi) / 2))}", lo, hi))
+    names = [r[0] for r in out]
+    if len(set(names)) != len(names):
+        raise SystemExit(f"--regions: two windows share a centre ({names}); give them different centres")
+    out.sort(key=lambda r: r[1])
+    for a, b in zip(out, out[1:]):
+        if b[1] < a[2]:
+            print(f"NOTE: windows {a[0]} ({a[1]:g}:{a[2]:g}) and {b[0]} ({b[1]:g}:{b[2]:g}) overlap; "
+                  "one peak can flag both. Reduce --region-halfwidth if that is not wanted.")
+    return out
+
+
+def region_flags(t, f, b, thr, regions):
+    """Per-region peak flag from the measured samples (t, f) inside each window.
+
+    flag is True when max >= thr (thr = k * baseline), False when measured but below, None when no
+    sample lies in the window (unmeasured is not 'no peak')."""
+    row = {}
+    for name, lo, hi in regions:
+        m = (t >= lo) & (t <= hi)
+        if not m.any():
+            row.update({f"flag_{name}": None, f"max_{name}": np.nan, f"angle_{name}": np.nan,
+                        f"ratio_{name}": np.nan})
+            continue
+        j = int(np.argmax(f[m]))
+        mx = float(f[m][j])
+        row.update({f"flag_{name}": bool(mx >= thr), f"max_{name}": mx, f"angle_{name}": float(t[m][j]),
+                    f"ratio_{name}": mx / b if b > 0 else np.nan})
+    row["regions"] = ";".join(f"{n}={lo:g}:{hi:g}" for n, lo, hi in regions)
+    row["n_peak_regions"] = int(sum(row[f"flag_{n}"] is True for n, _, _ in regions))
+    return row
+
+
 # --------------------------------------------------
 # One run
 # --------------------------------------------------
@@ -191,6 +258,7 @@ def run_metrics(run, g, args):
         b, rel = float(args.baseline), True
     thr = args.k * b
     row.update(baseline=b, baseline_reliable=bool(rel), threshold=thr)
+    row.update(region_flags(t, f, b, thr, args.regions))
 
     m = curve_metrics(t, f, b, thr, args.max_gap)
     bands = m.pop("bands")
@@ -255,6 +323,11 @@ def main():
                     help="csv with columns run_name,baseline giving a fixed quiet level per run "
                          "(e.g. taken from a full-sweep run at the same conditions)")
     ap.add_argument("--k", type=float, default=10.0, help="vibrating threshold = k * baseline")
+    ap.add_argument("--regions", nargs="+", default=DEFAULT_REGIONS,
+                    help="peak regions: window centres in deg (each +- --region-halfwidth) or LO:HI windows "
+                         "(default 120 170 210)")
+    ap.add_argument("--region-halfwidth", type=float, default=DEFAULT_HALFWIDTH_DEG,
+                    help="half-width (deg) of a window given as a centre (default 15)")
     ap.add_argument("--max-gap", type=float, default=20.0,
                     help="angle gaps longer than this (deg) are treated as unmeasured")
     ap.add_argument("--sweep-deg", type=float, default=360.0, help="reference sweep (full circle)")
@@ -273,6 +346,8 @@ def main():
             raise SystemExit(f"--sensor {args.sensor!r}: use S1 to S4")
         args.sensor_id = int(m[1])
         args.value_col = f"nvar_s{args.sensor_id}"
+
+    args.regions = parse_regions(args.regions, args.region_halfwidth)
 
     args.baseline_map = {}
     if args.baseline_file:
@@ -295,6 +370,10 @@ def main():
             "excess_mean_full", "vibrating_width_deg", "n_bands", "bands"]
     print(out.sort_values("excess_mean_full", ascending=False)[[c for c in show if c in out]]
           .to_string(index=False, float_format=lambda v: f"{v:.3g}"))
+
+    fcols = [f"flag_{n}" for n, _, _ in args.regions]
+    print("\nPeak-region flags (True = max in window >= %g x baseline; blank = window not measured):" % args.k)
+    print(out[["run_name"] + [c for c in fcols if c in out] + ["n_peak_regions"]].to_string(index=False))
 
     flags = []
     for _, r in out.iterrows():
