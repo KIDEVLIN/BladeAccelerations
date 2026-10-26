@@ -71,6 +71,8 @@ Options
     --track                map mode: mark the dominant-peak frequency at angles whose variance is >= 3x the median
     --vmin / --vmax        map colour limits (default 1st and 99.9th percentile of the PSD)
     --chord M              average chord for St (default 0.0138)
+    --transparent          save the PNG with a transparent background (figure and plot area), e.g. for slides.
+                           The text and lines are dark, so use it on a light slide background
     --out DIR, --dpi N
 
 Outputs (default <summaries>/figures): a PNG and CSVs with the plotted numbers (peak tables; spectra values).
@@ -93,6 +95,7 @@ from matplotlib.ticker import MultipleLocator                     # noqa: E402
 from scipy.ndimage import uniform_filter1d                        # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import plot_angle_sweep                                           # noqa: E402
 from plot_angle_sweep import (INK, MUTED, SURFACE, CAT, resolve, short_name, slug, parse_sensors,  # noqa: E402
                               style_axes, conditions_line, save, clip_matrix)
 
@@ -530,8 +533,10 @@ def main():
     ap.add_argument("--vmax", type=float)
     ap.add_argument("--chord", type=float, default=0.0138)
     ap.add_argument("--out")
+    ap.add_argument("--transparent", action="store_true")
     ap.add_argument("--dpi", type=int, default=200)
     args = ap.parse_args()
+    plot_angle_sweep.SAVE_TRANSPARENT = args.transparent
 
     args.ylin = (args.yscale or ("linear" if args.premult else "log")) == "linear"
     if args.mode == "map" and (args.premult or args.yscale):

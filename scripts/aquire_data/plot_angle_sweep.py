@@ -45,6 +45,8 @@ Options
                            Single dataset and stacked: also draws the baseline and threshold. The ranges
                            refer to the worst-sensor curve, not to the sensors you selected.
     --no-title             drop the title line
+    --transparent          save the PNG with a transparent background (figure and plot area), e.g. for slides.
+                           The text and lines are dark, so use it on a light slide background
     --no-frame-panel       drop the inclination / angle-of-attack panel
     --runs PATH, --metrics PATH   master_runs.csv / master_metrics.csv (default: next to master_angles.csv)
     --out DIR, --dpi N
@@ -86,6 +88,7 @@ SENSOR_MARKERS = ["o", "s", "^", "D"]
 NAME_RE = re.compile(r"^(?P<blade>.+?)_(?P<psi>\d+)psi_(?P<fs>\d+)fs(?:_v(?P<v>\d+))?$")
 KEY_RE = re.compile(r"^\s*(\d+)\s*/\s*(\d+)(?:\s*/\s*v?(\d+))?\s*$")
 NS = 4
+SAVE_TRANSPARENT = False      # set from --transparent (also by plot_psd.py, which saves through save())
 
 
 # --------------------------------------------------
@@ -345,7 +348,7 @@ def sensor_handles(sensors, any_clip, with_color=True):
 
 def save(fig, out_png, dpi):
     out_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_png, dpi=dpi, facecolor=SURFACE)
+    fig.savefig(out_png, dpi=dpi, facecolor="none" if SAVE_TRANSPARENT else SURFACE, transparent=SAVE_TRANSPARENT)
     plt.close(fig)
 
 
@@ -582,6 +585,7 @@ def main():
     ap.add_argument("--yscale", choices=["log", "linear"], default="log")
     ap.add_argument("--bands", action="store_true", help="shade vibrating ranges (needs master_metrics.csv)")
     ap.add_argument("--no-title", action="store_true")
+    ap.add_argument("--transparent", action="store_true")
     ap.add_argument("--no-frame-panel", action="store_true")
     ap.add_argument("--runs", help="master_runs.csv (default: next to master_angles.csv)")
     ap.add_argument("--metrics", help="master_metrics.csv (default: next to master_angles.csv)")
@@ -589,6 +593,8 @@ def main():
     ap.add_argument("--dpi", type=int, default=200)
     args = ap.parse_args()
 
+    global SAVE_TRANSPARENT
+    SAVE_TRANSPARENT = args.transparent
     src = Path(args.master_angles)
     df = pd.read_csv(src)
     need = {"run_name", "motor_angle_deg"} | set(axis_cols("mag"))

@@ -54,6 +54,8 @@ Options
     --angles PATH       master_angles.csv (default: next to master_runs.csv)
     --metrics PATH      master_metrics.csv (default: next to master_runs.csv; master_metrics_S4.csv with --sensor S4)
     --no-labels         hide the dataset names (e.g. 390/300)
+    --transparent          save the PNG with a transparent background (figure and plot area), e.g. for slides.
+                           The text and lines are dark, so use it on a light slide background
     --out DIR, --dpi N
 
 Outputs (in --out, default <master_runs folder>/figures):
@@ -355,7 +357,7 @@ def flag_figure(df, regions, sid, args, out):
     name = "design_space_flag_" + "_".join(regions) + (f"_S{sid}" if sid else "") + \
         ("_fullonly" if args.full_only else "")
     png = out / f"{name}.png"
-    fig.savefig(png, dpi=args.dpi, facecolor=SURFACE)
+    fig.savefig(png, dpi=args.dpi, facecolor="none" if args.transparent else SURFACE, transparent=args.transparent)
     plt.close(fig)
 
     cols = ["run_name", "reynolds_number", "cauchy_edgewise"] + \
@@ -398,6 +400,7 @@ def main():
     ap.add_argument("--separate-cbars", action="store_true")
     ap.add_argument("--full-only", action="store_true", help="plot only full-sweep runs")
     ap.add_argument("--no-labels", action="store_true", help="hide dataset names")
+    ap.add_argument("--transparent", action="store_true", help="transparent PNG background")
     args = ap.parse_args()
 
     panels = ["max", "p90"] if args.panels == "both" else [p.strip() for p in args.panels.split(",") if p.strip()]
@@ -522,7 +525,7 @@ def main():
     if args.cbar == "linear":
         name += "_linear"
     png = out / f"{name}.png"
-    fig.savefig(png, dpi=args.dpi, facecolor=SURFACE)
+    fig.savefig(png, dpi=args.dpi, facecolor="none" if args.transparent else SURFACE, transparent=args.transparent)
     plt.close(fig)
 
     cols = ["run_name", "reynolds_number", "cauchy_edgewise", "nvar_max", "nvar_max_angle_deg",
