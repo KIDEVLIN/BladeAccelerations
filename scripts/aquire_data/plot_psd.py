@@ -44,11 +44,10 @@ Options
                            so areas under curves still equal variances.
     --norm {ac,raw}        ac (default): PSD / a_c^2, so runs at different conditions are comparable
                            (same normalization as the variance plots); raw: g^2/Hz (g^2 per unit St)
-    --range-freq LO HI     fix the frequency range (Hz) of the PSD frequency axis and of the peak-frequency panel,
-                           e.g. --range-freq 50 250. Peaks are then also searched only inside it. Default: not fixed
-                           (autoscale, peaks searched over --fmin..--fmax). Spectra and runs modes only
-    --range-st LO HI       the same for --xaxis st, e.g. --range-st 0 0.8. On the log St axis of the PSD a lower limit
-                           of 0 cannot be drawn, so that axis then starts at the lowest St with data
+    --range-freq LO HI     fix the y axis of the peak-frequency panel (the lower plot of --mode runs) to LO..HI Hz for
+                           --xaxis freq, e.g. --range-freq 50 250. Only that axis changes: the PSD above keeps its full
+                           frequency range and the peaks are found as before. Default: autoscale
+    --range-st LO HI       the same for --xaxis st, e.g. --range-st 0 0.8
     --ylim-freq LO HI      fix the y axis of the PSD itself (with --xaxis freq), e.g. --ylim-freq 1e-8 1, so batch plots
     --ylim-st LO HI        share one scale (with --xaxis st). Separate options because the PSD is per Hz in one case and
     --ylim LO HI           per unit St in the other; --ylim sets both. With --premult give the f*S(f) values. Default: autoscale
@@ -188,14 +187,8 @@ def active_ylim(args):
     return tuple(yl) if yl else None
 
 
-def band(D, args, info=None):
-    """Mask of the frequency bins used. With info (spectra / runs modes) the fixed range is applied too."""
-    m = (D["f"] >= args.fmin) & (D["f"] <= args.fmax)
-    rng = active_range(args) if info is not None else None
-    if rng:
-        x = D["f"] * args.chord / info["velocity_m_s"] if args.xaxis == "st" else D["f"]
-        m &= (x >= rng[0]) & (x <= rng[1])
-    return m
+def band(D, args):
+    return (D["f"] >= args.fmin) & (D["f"] <= args.fmax)
 
 
 def peak_of(D, S, args):
@@ -348,7 +341,7 @@ def pick_angles(D, args):
 
 def fig_spectra(run, D, info, args, out):
     x, S = transform(D, info, args, args.smooth)
-    m = band(D, args, info)
+    m = band(D, args)
     sel = pick_angles(D, args)
     fig, ax = plt.subplots(figsize=(11, 5.8), facecolor=SURFACE, constrained_layout=True)
     rows, tab = [], pd.DataFrame({"f_hz": D["f"], "St": D["f"] * args.chord / info["velocity_m_s"]})
@@ -455,13 +448,12 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
         ax = fig.add_subplot(gs[0, 0])
         if not by_flag:
             cax = fig.add_subplot(gs[0, 1])
-    rows, angs, used, xseen = [], [], [], []
+    rows, angs, used = [], [], []
     for r, v in zip(runs, vals):
         D, info = data[r], infos[r]
         fl = flags.get(r) if flags else None
         x, S = transform(D, info, args, args.smooth)
-        m = band(D, args, info)
-        xseen.append(x[m].min())
+        m = band(D, args)
         if args.at == "peak" and window:
             inw = (D["th"] >= window[0]) & (D["th"] <= window[1]) & np.isfinite(D["nv"])
             if not inw.any():
@@ -490,9 +482,6 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
         raise SystemExit("no runs left to plot")
     ax.set_xscale("log")
     set_yaxis(ax, args)
-    rng = active_range(args)
-    if rng:
-        ax.set_xlim(rng[0] if rng[0] > 0 else min(xseen), rng[1])
     ax.set_xlabel(xlabel(args), color=INK)
     ax.set_ylabel(sym_psd(args), color=INK)
     style_axes(ax)
@@ -529,6 +518,7 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
             axp.set_xscale("log")
         axp.set_xlabel(clabel, color=INK)
         axp.set_ylabel("Peak St" if args.xaxis == "st" else "Peak frequency (Hz)", color=INK)
+        rng = active_range(args)
         if rng:
             axp.set_ylim(*rng)
         style_axes(axp)
@@ -590,9 +580,10 @@ def main():
     args.ylin = (args.yscale or ("linear" if args.premult else "log")) == "linear"
     fixed = [n for n, v in (("--ylim", args.ylim), ("--ylim-freq", args.ylim_freq), ("--ylim-st", args.ylim_st),
                             ("--range-freq", args.range_freq), ("--range-st", args.range_st)) if v]
-    if args.mode == "map" and (args.premult or args.yscale or fixed):
-        raise SystemExit("--premult, --yscale, --ylim* and --range-* apply to --mode spectra and runs "
-                         "(map shows the PSD as colour)")
+    if args.mode == "map" and (args.premult or args.yscale or any(n.startswith("--ylim") for n in fixed)):
+        raise SystemExit("--premult, --yscale and --ylim* apply to --mode spectra and runs (map shows the PSD as colour)")
+    if args.mode != "runs" and (args.range_freq or args.range_st):
+        raise SystemExit("--range-freq / --range-st fix the peak-frequency panel, which only --mode runs has")
     for name, r in (("--range-freq", args.range_freq), ("--range-st", args.range_st), ("--ylim", args.ylim),
                     ("--ylim-freq", args.ylim_freq), ("--ylim-st", args.ylim_st)):
         if r and not r[0] < r[1]:
