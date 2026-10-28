@@ -192,7 +192,7 @@ def pick_regions(df, wanted, mpath):
     for w in wanted:
         name = w if w.startswith("r") else f"r{w}"
         if name not in have:
-            raise SystemExit(f"--flag {w!r}: no such region; {mpath} has {have}")
+            raise SystemExit(f"region {w!r}: no such region; {mpath} has {have}")
         out.append(name)
     return out
 
