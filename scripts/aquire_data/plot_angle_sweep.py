@@ -45,8 +45,11 @@ Options
                            Single dataset and stacked: also draws the baseline and threshold. The ranges
                            refer to the worst-sensor curve, not to the sensors you selected.
     --no-title             drop the title line
-    --transparent          save the PNG with a transparent background (figure and plot area), e.g. for slides.
-                           The text and lines are dark, so use it on a light slide background
+    --transparent / --no-transparent   PNG background: transparent (default) or the off-white of earlier versions.
+                           The text and lines are dark, so a transparent PNG belongs on a light slide background
+    --box / --no-box       frame all four sides of the plot (default: box)
+    --fontsize N           base font size in points (default 10). Axis labels and ticks use it; titles, legends and
+                           annotations scale in proportion, so 14 makes everything 1.4x larger
     --no-frame-panel       drop the inclination / angle-of-attack panel
     --runs PATH, --metrics PATH   master_runs.csv / master_metrics.csv (default: next to master_angles.csv)
     --out DIR, --dpi N
@@ -88,7 +91,10 @@ SENSOR_MARKERS = ["o", "s", "^", "D"]
 NAME_RE = re.compile(r"^(?P<blade>.+?)_(?P<psi>\d+)psi_(?P<fs>\d+)fs(?:_v(?P<v>\d+))?$")
 KEY_RE = re.compile(r"^\s*(\d+)\s*/\s*(\d+)(?:\s*/\s*v?(\d+))?\s*$")
 NS = 4
-SAVE_TRANSPARENT = False      # set from --transparent (also by plot_psd.py, which saves through save())
+SAVE_TRANSPARENT = True       # figure style, set once from the command line by apply_style()
+BOX = True
+BASE_FONT = 10.0
+FONT_SCALE = 1.0
 
 
 # --------------------------------------------------
@@ -243,14 +249,39 @@ def conditions_line(run, info):
 # Drawing helpers
 # --------------------------------------------------
 
+def fs(size):
+    """A font size in points, scaled by --fontsize (sizes in the code are for the default base of 10)."""
+    return size * FONT_SCALE
+
+
+def frame(ax):
+    """Axes outline: a box on all four sides (default) or only left and bottom (--no-box)."""
+    for side in ("top", "right", "left", "bottom"):
+        ax.spines[side].set_visible(BOX or side in ("left", "bottom"))
+        ax.spines[side].set_color(INK if BOX else MUTED)
+        ax.spines[side].set_linewidth(1.0 if BOX else 0.8)
+
+
+def add_style_args(ap):
+    ap.add_argument("--transparent", action=argparse.BooleanOptionalAction, default=True,
+                    help="transparent PNG background (default) or --no-transparent")
+    ap.add_argument("--box", action=argparse.BooleanOptionalAction, default=True,
+                    help="frame all four sides of the plot (default) or --no-box")
+    ap.add_argument("--fontsize", type=float, default=BASE_FONT,
+                    help="base font size in points (default 10); everything scales with it")
+
+
+def apply_style(args):
+    global SAVE_TRANSPARENT, BOX, FONT_SCALE
+    SAVE_TRANSPARENT, BOX, FONT_SCALE = args.transparent, args.box, args.fontsize / BASE_FONT
+    plt.rcParams["font.size"] = args.fontsize
+
+
 def style_axes(ax):
     ax.set_facecolor(SURFACE)
     ax.grid(True, which="major", color=GRID, linewidth=0.8, zorder=0)
     ax.set_axisbelow(True)
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
-    for s in ("left", "bottom"):
-        ax.spines[s].set_color(MUTED)
+    frame(ax)
     ax.tick_params(colors=MUTED, which="both")
 
 
@@ -284,7 +315,7 @@ def draw_bands(ax, met, color=MUTED, alpha=0.13, lines=True):
             if yv is not None and np.isfinite(yv):
                 ax.axhline(yv, color=MUTED, lw=0.9, ls=(0, (4, 3)), zorder=2)
                 ax.annotate(txt, (1.0, yv), xycoords=("axes fraction", "data"), xytext=(-4, 3),
-                            textcoords="offset points", ha="right", va="bottom", fontsize=8, color=MUTED)
+                            textcoords="offset points", ha="right", va="bottom", fontsize=fs(8), color=MUTED)
 
 
 def draw_frame_panel(ax2, th, incl, aoa):
@@ -296,7 +327,7 @@ def draw_frame_panel(ax2, th, incl, aoa):
         fin = np.isfinite(y)
         if fin.any():
             j = np.where(fin)[0][-1]
-            ax2.annotate(label, (x[j], y[j]), xytext=(6, 0), textcoords="offset points", fontsize=8.5,
+            ax2.annotate(label, (x[j], y[j]), xytext=(6, 0), textcoords="offset points", fontsize=fs(8.5),
                          color=color, va="center", annotation_clip=False)
     ax2.set_ylabel("Blade frame (deg)", color=INK)
     style_axes(ax2)
@@ -383,12 +414,12 @@ def fig_single(run, d, info, met, sensors, args, out_png):
     handles = sensor_handles(sensors, d["clip"][:, [s - 1 for s in sensors]].any())
     if args.bands and met is not None and parse_bands(met.get("bands")):
         handles.append(plt.Rectangle((0, 0), 1, 1, color=MUTED, alpha=0.2, lw=0, label="vibrating range"))
-    ax.legend(handles=handles, loc="upper left", ncol=min(len(handles), 4), frameon=False, fontsize=9,
+    ax.legend(handles=handles, loc="upper left", ncol=min(len(handles), 4), frameon=False, fontsize=fs(9),
               labelcolor=INK, columnspacing=1.4, handletextpad=0.5)
     style_axes(ax)
     if not args.no_title:
         ax.set_title(conditions_line(run, info) + (f"   ·   {args.component} axis" if args.component in AXES else ""),
-                     loc="left", fontsize=11, color=INK)
+                     loc="left", fontsize=fs(11), color=INK)
     last = ax
     if ax2 is not None:
         draw_frame_panel(ax2, d["th"], d["incl"], d["aoa"])
@@ -433,7 +464,7 @@ def fig_components(run, d, info, met, sensors, args, out_png):
                 any_clip = True
                 ax.scatter(d["th"][m], d["nvc"][a][m, i], s=95, facecolor="none", edgecolor=INK, linewidth=1.2, zorder=6)
         style_axes(ax)
-        ax.set_title(f"S{sid}", loc="left", fontsize=10, color=INK)
+        ax.set_title(f"S{sid}", loc="left", fontsize=fs(10), color=INK)
         ax.tick_params(labelbottom=False)
     set_variance_limits(axes[0], [d["nvc"][a][:, s - 1] for a in AXES for s in sensors]
                         + [d["nv_mag"][:, s - 1] for s in sensors], args.yscale)
@@ -442,11 +473,11 @@ def fig_components(run, d, info, met, sensors, args, out_png):
     h.append(Line2D([], [], color=MUTED, lw=1.2, ls=(0, (4, 3)), label="|a| (magnitude)"))
     if any_clip:
         h.append(Line2D([], [], marker="o", ls="", ms=9, mfc="none", mec=INK, mew=1.2, label="clipped (lower bound)"))
-    axes[0].legend(handles=h, loc="lower right", bbox_to_anchor=(1.0, 1.0), ncol=5, frameon=False, fontsize=9,
+    axes[0].legend(handles=h, loc="lower right", bbox_to_anchor=(1.0, 1.0), ncol=5, frameon=False, fontsize=fs(9),
                    labelcolor=INK, columnspacing=1.4, handletextpad=0.5, borderaxespad=0.2)
-    fig.supylabel(ylabel_for("xyz"), color=INK, fontsize=10)
+    fig.supylabel(ylabel_for("xyz"), color=INK, fontsize=fs(10))
     if not args.no_title:
-        fig.suptitle(conditions_line(run, info), x=0.01, ha="left", fontsize=11, color=INK)
+        fig.suptitle(conditions_line(run, info), x=0.01, ha="left", fontsize=fs(11), color=INK)
     last = axes[-1]
     if has_frame:
         ax2 = fig.add_subplot(gs[n], sharex=axes[0])
@@ -509,13 +540,13 @@ def fig_overlay(runs, data, infos, mets, sensors, args, out_png):
     if any_clip:
         handles.append(Line2D([], [], marker="o", ls="", ms=9, mfc="none", mec=INK, mew=1.2, label="clipped (lower bound)"))
     ax.legend(handles=handles, loc="upper left", ncol=1 if len(handles) <= 4 else (2 if len(handles) <= 12 else 3), frameon=False,
-              fontsize=9 if len(handles) <= 12 else 8,
+              fontsize=fs(9 if len(handles) <= 12 else 8),
               labelcolor=INK)
     style_axes(ax)
     if not args.no_title:
         ax.set_title("Accelerometer " + ", ".join(f"S{s}" for s in sensors)
                      + (f"   ·   {args.component} axis" if args.component in AXES else ""),
-                     loc="left", fontsize=11, color=INK)
+                     loc="left", fontsize=fs(11), color=INK)
     last = ax
     if ax2 is not None:
         draw_frame_panel(ax2, ref["th"], ref["incl"], ref["aoa"])
@@ -549,12 +580,12 @@ def fig_stacked(runs, data, infos, mets, sensors, args, out_png):
         if args.bands:
             draw_bands(ax, mets.get(run))
         style_axes(ax)
-        ax.set_title(conditions_line(run, infos.get(run)), loc="left", fontsize=10, color=INK)
+        ax.set_title(conditions_line(run, infos.get(run)), loc="left", fontsize=fs(10), color=INK)
         ax.tick_params(labelbottom=False)
     set_variance_limits(axes[0], arrays, args.yscale)
     axes[0].legend(handles=sensor_handles(sensors, any_clip), loc="upper left", ncol=5, frameon=False,
-                   fontsize=9, labelcolor=INK, columnspacing=1.4, handletextpad=0.5)
-    fig.supylabel(ylabel_for(args.component), color=INK, fontsize=10)
+                   fontsize=fs(9), labelcolor=INK, columnspacing=1.4, handletextpad=0.5)
+    fig.supylabel(ylabel_for(args.component), color=INK, fontsize=fs(10))
     last = axes[-1]
     if show_frame:
         ax2 = fig.add_subplot(gs[n], sharex=axes[0])
@@ -585,7 +616,7 @@ def main():
     ap.add_argument("--yscale", choices=["log", "linear"], default="log")
     ap.add_argument("--bands", action="store_true", help="shade vibrating ranges (needs master_metrics.csv)")
     ap.add_argument("--no-title", action="store_true")
-    ap.add_argument("--transparent", action="store_true")
+    add_style_args(ap)
     ap.add_argument("--no-frame-panel", action="store_true")
     ap.add_argument("--runs", help="master_runs.csv (default: next to master_angles.csv)")
     ap.add_argument("--metrics", help="master_metrics.csv (default: next to master_angles.csv)")
@@ -593,8 +624,7 @@ def main():
     ap.add_argument("--dpi", type=int, default=200)
     args = ap.parse_args()
 
-    global SAVE_TRANSPARENT
-    SAVE_TRANSPARENT = args.transparent
+    apply_style(args)
     src = Path(args.master_angles)
     df = pd.read_csv(src)
     need = {"run_name", "motor_angle_deg"} | set(axis_cols("mag"))
