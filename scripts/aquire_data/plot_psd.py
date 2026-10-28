@@ -76,8 +76,8 @@ Options
     --flag-false {show,grey,hide}   runs mode, needs --region. Runs whose flag is False (measured, no peak in the
                            region) are drawn as usual (show, default), greyed out behind the others (grey), or left
                            out (hide). Runs whose region was not measured (blank flag) are never greyed or hidden.
-                           Greyed runs get no peak marker and no point in the peak-frequency panel (their
-                           "peak" would only be the noise floor).
+                           Greyed runs get a grey point in the peak-frequency panel (their highest bin, which for a run
+                           without a peak is usually just the noise floor, often at --fmin) and no marker on the PSD.
     --metrics PATH         master_metrics_S<sensor>.csv holding the flags (default: next to master_angles.csv; run
                            angle_metrics.py --sensor S4 first). Flags come from the |a| variance of that sensor, also
                            when --component is x, y or z
@@ -471,9 +471,11 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
         ax.plot(x[m], sp[m], color=col, lw=lw, ls=ls, zorder=z)
         angs.append(D["th"][j])
         used.append((fl, grey))
-        if show_pk and not grey:      # a run with no peak in the region has no peak frequency (it would be the noise-floor edge)
-            ax.scatter([x[k]], [sp[k]], s=26, color=col, edgecolor=INK, linewidth=0.6, zorder=z + 2)
-            axp.scatter([v], [x[k]], s=46, color=col, edgecolor=INK, linewidth=0.7, zorder=z + 1)
+        if show_pk:
+            if not grey:              # no marker on the PSD of a greyed run: its maximum is usually just the noise floor
+                ax.scatter([x[k]], [sp[k]], s=26, color=col, edgecolor=INK, linewidth=0.6, zorder=z + 2)
+            axp.scatter([v], [x[k]], s=46, color=col, edgecolor="#9a9993" if grey else INK, linewidth=0.7,
+                        zorder=z + 1)
         rows.append(dict(run_name=r, colorby=args.colorby, value=v, motor_angle_deg=D["th"][j], nvar=D["nv"][j],
                          peak_hz=D["f"][k], peak_St=D["f"][k] * args.chord / info["velocity_m_s"], peak_psd=s[k],
                          clipped=bool(D["clip"][j]), region=args.region_name if flags else "",
