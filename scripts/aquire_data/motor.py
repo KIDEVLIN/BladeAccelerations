@@ -25,10 +25,22 @@ if an exception is raised):
         print(motor.position())
 """
 
+import re                      # top of file
+
+_IP_REPLY_RE = re.compile(rb"IP=([0-9A-Fa-f]{1,8})\r")
+_IP_8DIG_RE = re.compile(rb"IP=([0-9A-Fa-f]{8})")
+MAX_PLAUSIBLE_DEG_PER_S = 1000.0   # generous; VE1 is ~360 deg/s
+JUMP_BASE_DEG = 5.0
+RESYNC_AFTER = 50                  # accept a new baseline after this many consecutive rejects
+
 import nidaqmx
 import serial
 import threading
 import time
+import statistics
+# top of file, after imports
+ABS_MAX_TRAVEL_DEG = 360.0   # hard ceiling; max_travel_deg can be lowered but never raised past this
+LIMIT_MARGIN_DEG = 5.0       # tolerance on the current encoder reading before we refuse to move
 
 
 class Motor:
@@ -48,6 +60,13 @@ class Motor:
         self.poll_interval = poll_interval
         self.daq_line = daq_line
         self.max_travel_deg = max_travel_deg
+        self.rejected_reads = 0
+        if max_travel_deg > ABS_MAX_TRAVEL_DEG:
+            raise ValueError(
+                f"max_travel_deg={max_travel_deg} exceeds the hard limit of "
+                f"+/-{ABS_MAX_TRAVEL_DEG} deg")
+        # Largest legitimate single DI is a full swing from -max to +max
+        self._max_di_counts = int(round(2 * max_travel_deg * counts_per_deg)) + 1
 
         self._ser = None
 
@@ -64,6 +83,7 @@ class Motor:
         self._encoder_lock = threading.Lock()
         self._latest_counts = None
         self._latest_time = None
+        self._history = []
 
         self._stop_polling = threading.Event()
         self._poll_thread = None
@@ -84,6 +104,28 @@ class Motor:
         self.stop()
         return False
 
+    def _require_sane_position(self, current_counts):
+        """Refuse to move if the encoder says we're already outside the travel
+        limits -- that means a bad reading or a motor that's out of range."""
+        deg = self.counts_to_degrees(current_counts)
+        if abs(deg) > self.max_travel_deg + LIMIT_MARGIN_DEG:
+            raise RuntimeError(
+                f"Encoder reads {deg:+.1f} deg, outside the +/-{self.max_travel_deg:.0f} deg "
+                f"limit (+{LIMIT_MARGIN_DEG} deg margin) -- bad reading or motor out of "
+                f"range; refusing to move.")
+
+    def _send(self, cmd, delay=0.02):
+        # Last line of defence: no single DI may exceed a full -max..+max swing,
+        # whatever the caller computed.
+        if cmd.startswith("DI"):
+            di = int(cmd[2:])
+            if abs(di) > self._max_di_counts:
+                raise ValueError(
+                    f"Refusing {cmd}: {abs(di) / self.counts_per_deg:.1f} deg move exceeds "
+                    f"the {2 * self.max_travel_deg:.0f} deg maximum single move")
+        with self._serial_lock:
+            ...   # rest unchanged
+
     # ----------------------------------------------------------------
     # Lifecycle: start() / stop()
     # ----------------------------------------------------------------
@@ -95,8 +137,9 @@ class Motor:
             self.port, self.baud, timeout=0.1, write_timeout=0.1
         )
         self._log_file = open(self._log_path, "w", buffering=1)
-        self._log_file.write("time_sec, encoder_counts\n")
         self._start_time = time.perf_counter()
+        self._log_file.write(f"# start_time_perf_counter={self._start_time:.6f}\n")
+        self._log_file.write("time_sec, encoder_counts\n")
 
         self._stop_polling.clear()
         self._poll_thread = threading.Thread(
@@ -147,38 +190,53 @@ class Motor:
         return data.decode(errors="ignore").strip() if data else ""
 
     def _read_encoder_counts_locked(self):
-        """Does the actual IP write/read/parse. Caller must already hold
-        _serial_lock -- this method does not lock on its own."""
+        """Caller must hold _serial_lock."""
+        self._ser.reset_input_buffer()           # drop stale acks / half replies
         self._ser.write(b"IP\r")
-        time.sleep(0.0012)
-        data = self._ser.read(self._ser.in_waiting)
-        if not data:
+        buf = b""
+        for _ in range(3):
+            line = self._ser.read_until(b"\r")   # blocks until CR or the port timeout
+            buf += line
+            m = _IP_REPLY_RE.search(line)
+            if m:
+                break
+            if not line.endswith(b"\r"):
+                m = _IP_8DIG_RE.search(buf)      # no CR seen: only trust a full 8-digit value
+                break
+        else:
+            m = None
+        if m is None:
             return None
-        try:
-            resp = data.decode(errors="ignore").strip()
-            if "=" not in resp:
-                return None
-            hex_val = resp.split("=")[1]
-            counts = int(hex_val, 16)
-            if counts >= 0x80000000:
-                counts -= 0x100000000
-            return counts
-        except Exception:
-            return None
+        counts = int(m.group(1), 16)
+        if counts >= 0x80000000:
+            counts -= 0x100000000
+        return counts
 
     # ----------------------------------------------------------------
     # Background encoder polling / logging thread
     # ----------------------------------------------------------------
 
     def _encoder_poll_loop(self):
+        last_counts, last_t, n_rej = None, None, 0
         while not self._stop_polling.is_set():
             with self._serial_lock:
                 counts = self._read_encoder_counts_locked()
             if counts is not None:
                 t = time.perf_counter() - self._start_time
+                if last_counts is not None and n_rej < RESYNC_AFTER:
+                    jump_deg = abs(counts - last_counts) / self.counts_per_deg
+                    if jump_deg > JUMP_BASE_DEG + MAX_PLAUSIBLE_DEG_PER_S * (t - last_t):
+                        n_rej += 1
+                        self.rejected_reads += 1
+                        time.sleep(self.poll_interval)
+                        continue
+                if n_rej >= RESYNC_AFTER:
+                    print(f"  WARN: {n_rej} consecutive implausible encoder reads -- resyncing")
+                n_rej, last_counts, last_t = 0, counts, t
                 with self._encoder_lock:
                     self._latest_counts = counts
                     self._latest_time = t
+                    self._history.append((t, counts))
                 self._log_file.write(f"{t:.6f}, {counts}\n")
             time.sleep(self.poll_interval)
 
@@ -249,10 +307,29 @@ class Motor:
         else:
             print("Warning: no encoder reading available yet.")
 
+    def angle_stats(self, t0_abs, t1_abs):
+        """(mean_deg, std_deg, n) of the ENCODER angle over [t0_abs, t1_abs],
+        in time.perf_counter() terms (same clock as the capture t_start values).
+        Returns (None, None, 0) if no encoder samples fall in the window."""
+        t0 = t0_abs - self._start_time
+        t1 = t1_abs - self._start_time
+        with self._encoder_lock:
+            counts = [c for (t, c) in self._history if t0 <= t <= t1]
+        if not counts:
+            return None, None, 0
+        degs = [self.counts_to_degrees(c) for c in counts]
+        n = len(degs)
+        mean = sum(degs) / n
+        std = (sum((d - mean) ** 2 for d in degs) / n) ** 0.5   # population std
+        return mean, std, n
+
     def move(self, angle_deg):
         """Relative move by angle_deg. Raises ValueError if the resulting
         absolute position would exceed +/- max_travel_deg."""
         current_counts, _ = self.get_latest_encoder()
+        if current_counts is not None:
+            self._require_sane_position(current_counts)
+            projected_deg = ...   # existing code
         if current_counts is not None:
             projected_deg = self.counts_to_degrees(current_counts) + angle_deg
             if abs(projected_deg) > self.max_travel_deg:
@@ -268,7 +345,7 @@ class Motor:
         self._send("FL")
 
     def move_to_angle(self, target_deg, wait=True, tolerance_deg=0.1,
-                       stable_samples=3, timeout_s=10.0, poll_interval=0.01,
+                       stable_samples=3, timeout_s=30.0, poll_interval=0.01,
                        on_poll=None):
         """Absolute move to target_deg, computed relative to the last
         known encoder reading. Raises ValueError if target_deg is outside
@@ -287,6 +364,9 @@ class Motor:
         current_counts, _ = self.get_latest_encoder()
         if current_counts is None:
             print("No encoder reading yet -- can't compute a relative move.")
+            # in move_to_angle(): after the "No encoder reading yet" early return
+            self._require_sane_position(current_counts)
+            print(f"Current counts: {current_counts}")   # makes a bad read visible in the log
             return None
 
         target_counts = self.degrees_to_counts(target_deg)
@@ -309,7 +389,7 @@ class Motor:
         return None
 
     def wait_until_settled(self, target_deg, tolerance_deg=0.1,
-                            stable_samples=3, timeout_s=10.0, poll_interval=0.01,
+                            stable_samples=3, timeout_s=30.0, poll_interval=0.01,
                             on_poll=None):
         """Block until the background-thread encoder cache reports a
         position within tolerance_deg of target_deg for `stable_samples`
@@ -344,7 +424,7 @@ class Motor:
             f"(last reading: {last_deg})"
         )
 
-    def home(self, wait=True, timeout_s=15.0):
+    def home(self, wait=True, timeout_s=30.0):
         """Return to the encoder zero reference. Call this at the end of
         every run (and from a finally block) so the physical zero stays
         consistent across power cycles."""

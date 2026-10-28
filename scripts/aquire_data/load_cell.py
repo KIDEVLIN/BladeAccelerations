@@ -47,7 +47,7 @@ import time
 import numpy as np
 import nidaqmx
 from nidaqmx.constants import TerminalConfiguration
-from scripts.aquire_data.utils.live_variance_plot import loadcell_magnitude_variance   # NEW import at top of file
+from utils.live_variance_plot import loadcell_magnitude_variance   # NEW import at top of file
 
 
 N_CHANNELS = 6  # AI0 through AI5, see column mapping below
