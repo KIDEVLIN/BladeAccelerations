@@ -44,12 +44,14 @@ Options
                            so areas under curves still equal variances.
     --norm {ac,raw}        ac (default): PSD / a_c^2, so runs at different conditions are comparable
                            (same normalization as the variance plots); raw: g^2/Hz (g^2 per unit St)
-    --range-freq LO HI     fixed frequency range (Hz, default 50 250) for the PSD frequency axis and the peak-frequency
-                           panel; peaks are also searched only inside it. Spectra and runs modes (map keeps --fmin/--fmax)
-    --range-st LO HI       the same for --xaxis st (default 0 0.8). On the log St axis of the PSD a lower limit of 0
-                           cannot be drawn, so the axis then starts at the lowest St with data
-    --auto-range           autoscale the frequency axes instead (searches --fmin..--fmax, as before)
-    --ylim LO HI           fix the y axis of the PSD itself (e.g. to compare batch plots); default autoscale
+    --range-freq LO HI     fix the frequency range (Hz) of the PSD frequency axis and of the peak-frequency panel,
+                           e.g. --range-freq 50 250. Peaks are then also searched only inside it. Default: not fixed
+                           (autoscale, peaks searched over --fmin..--fmax). Spectra and runs modes only
+    --range-st LO HI       the same for --xaxis st, e.g. --range-st 0 0.8. On the log St axis of the PSD a lower limit
+                           of 0 cannot be drawn, so that axis then starts at the lowest St with data
+    --ylim-freq LO HI      fix the y axis of the PSD itself (with --xaxis freq), e.g. --ylim-freq 1e-8 1, so batch plots
+    --ylim-st LO HI        share one scale (with --xaxis st). Separate options because the PSD is per Hz in one case and
+    --ylim LO HI           per unit St in the other; --ylim sets both. With --premult give the f*S(f) values. Default: autoscale
     --premult              spectra and runs modes: plot f*S(f) (St*S(St) with --xaxis st) on a LINEAR y axis against the
                            log frequency axis. Because  integral S df = integral f*S d(ln f), equal areas under the curve
                            now mean equal variance (energy), so the peaks can be compared by eye; on the log-log plot
@@ -175,10 +177,15 @@ def transform(D, info, args, smooth=1):
 
 
 def active_range(args):
-    """(lo, hi) of the fixed frequency range in the units of --xaxis, or None with --auto-range."""
-    if args.auto_range:
-        return None
-    return tuple(args.range_st if args.xaxis == "st" else args.range_freq)
+    """(lo, hi) of the fixed frequency range in the units of --xaxis, or None when not fixed (default)."""
+    rng = args.range_st if args.xaxis == "st" else args.range_freq
+    return tuple(rng) if rng else None
+
+
+def active_ylim(args):
+    """(lo, hi) of the fixed PSD y axis for the current --xaxis, or None when not fixed (default)."""
+    yl = (args.ylim_st if args.xaxis == "st" else args.ylim_freq) or args.ylim
+    return tuple(yl) if yl else None
 
 
 def band(D, args, info=None):
@@ -243,8 +250,9 @@ def set_yaxis(ax, args):
         ax.set_ylim(bottom=0)
     else:
         ax.set_yscale("log")
-    if args.ylim:
-        ax.set_ylim(*args.ylim)
+    yl = active_ylim(args)
+    if yl:
+        ax.set_ylim(*yl)
     if args.premult:
         ax.text(0.995, 0.015, "equal area under the curve = equal variance", transform=ax.transAxes, ha="right",
                 va="bottom", fontsize=fs(8), color=MUTED)
@@ -549,10 +557,11 @@ def main():
     ap.add_argument("--norm", choices=["ac", "raw"], default="ac")
     ap.add_argument("--premult", action="store_true")
     ap.add_argument("--yscale", choices=["log", "linear"])
-    ap.add_argument("--range-freq", nargs=2, type=float, default=[50.0, 250.0], metavar=("LO", "HI"))
-    ap.add_argument("--range-st", nargs=2, type=float, default=[0.0, 0.8], metavar=("LO", "HI"))
-    ap.add_argument("--auto-range", action="store_true")
+    ap.add_argument("--range-freq", nargs=2, type=float, metavar=("LO", "HI"))
+    ap.add_argument("--range-st", nargs=2, type=float, metavar=("LO", "HI"))
     ap.add_argument("--ylim", nargs=2, type=float, metavar=("LO", "HI"))
+    ap.add_argument("--ylim-freq", nargs=2, type=float, metavar=("LO", "HI"))
+    ap.add_argument("--ylim-st", nargs=2, type=float, metavar=("LO", "HI"))
     ap.add_argument("--fmin", type=float, default=5.0)
     ap.add_argument("--fmax", type=float, default=500.0)
     ap.add_argument("--flog", action="store_true")
@@ -579,11 +588,17 @@ def main():
     apply_style(args)
 
     args.ylin = (args.yscale or ("linear" if args.premult else "log")) == "linear"
-    if args.mode == "map" and (args.premult or args.yscale or args.ylim):
-        raise SystemExit("--premult, --yscale and --ylim apply to --mode spectra and runs (map shows the PSD as colour)")
-    for name, r in (("--range-freq", args.range_freq), ("--range-st", args.range_st)):
-        if not r[0] < r[1]:
+    fixed = [n for n, v in (("--ylim", args.ylim), ("--ylim-freq", args.ylim_freq), ("--ylim-st", args.ylim_st),
+                            ("--range-freq", args.range_freq), ("--range-st", args.range_st)) if v]
+    if args.mode == "map" and (args.premult or args.yscale or fixed):
+        raise SystemExit("--premult, --yscale, --ylim* and --range-* apply to --mode spectra and runs "
+                         "(map shows the PSD as colour)")
+    for name, r in (("--range-freq", args.range_freq), ("--range-st", args.range_st), ("--ylim", args.ylim),
+                    ("--ylim-freq", args.ylim_freq), ("--ylim-st", args.ylim_st)):
+        if r and not r[0] < r[1]:
             raise SystemExit(f"{name} needs LO < HI")
+        if r and name.startswith("--ylim") and not args.ylin and r[0] <= 0:
+            raise SystemExit(f"{name}: LO must be > 0 on a log y axis (or use --yscale linear / --premult)")
     summ = Path(args.summaries)
     summ = summ.parent if summ.is_file() else summ
     runs_csv = summ / "master_runs.csv"
