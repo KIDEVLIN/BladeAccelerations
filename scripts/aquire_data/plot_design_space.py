@@ -56,8 +56,13 @@ Options
     --no-labels         hide the dataset names (e.g. 390/300)
     --no-squares        draw every run as a circle, without the clipped-angle square
     --no-title          leave out the panel titles
-    --fontsize N        base font size in points (default 10); titles, legends and labels scale with it
-    --latex             typeset all text with LaTeX (serif, needs latex on PATH)
+    --transparent / --no-transparent   PNG background: transparent (default) or the off-white of earlier versions.
+                           The text and lines are dark, so a transparent PNG belongs on a light slide background
+    --box / --no-box       frame all four sides of the plot (default: box)
+    --grid / --no-grid     background grid (default: grid)
+    --fontsize N           base font size in points (default 10). Axis labels and ticks use it; titles, legends and
+                           annotations scale in proportion, so 14 makes everything 1.4x larger
+    --latex                typeset all text with LaTeX (serif, needs latex on PATH)
     --out DIR, --dpi N
 
 Outputs (in --out, default <master_runs folder>/figures):
@@ -77,8 +82,8 @@ Requires: numpy pandas matplotlib
 """
 
 import argparse
+import sys
 import re
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -89,6 +94,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt                                  # noqa: E402
 from matplotlib.colors import LogNorm, Normalize                 # noqa: E402
 from matplotlib.lines import Line2D                              # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from plot_angle_sweep import add_style_args, apply_style, fs, style_axes, txt   # noqa: E402
 
 INK = "#1a1a19"
 MUTED = "#6b6b66"
@@ -108,24 +116,6 @@ METRICS = {
 NEEDED = ["run_name", "nominal_psi", "fan_setting", "version", "reynolds_number",
           "cauchy_edgewise", "nvar_max", "nvar_p90", "n_accel_clipped"]
 FLAG_TRUE, FLAG_FALSE = "#d55e00", "#dcdbd6"     # peak (vermillion) vs no peak (light grey)
-FONT_SCALE = 1.0                                  # --fontsize / 10, set in main()
-
-
-USETEX = False                                    # --latex, set in main()
-_TEX = {"–": "--", "≥": r"$\geq$", "×": r"$\times$", "°": r"$^\circ$"}
-
-
-def fs(size):
-    """Font size scaled by --fontsize (default 10 = sizes as written)."""
-    return size * FONT_SCALE
-
-
-def txt(s):
-    """Text as written, or with the unicode symbols LaTeX cannot typeset replaced when --latex is on."""
-    if USETEX:
-        for a, b in _TEX.items():
-            s = s.replace(a, b)
-    return s
 REGION_COL = re.compile(r"^(flag|max|angle|ratio)_(r-?\d+)$")
 FROM_METRICS = ["excess_mean_full", "vibrating_width_deg", "nvar_p90_weighted", "full_sweep",
                 "baseline", "baseline_reliable", "threshold"]
@@ -205,7 +195,7 @@ def pick_regions(df, wanted, mpath):
     for w in wanted:
         name = w if w.startswith("r") else f"r{w}"
         if name not in have:
-            raise SystemExit(f"--flag {w!r}: no such region; {mpath} has {have}")
+            raise SystemExit(f"region {w!r}: no such region; {mpath} has {have}")
         out.append(name)
     return out
 
@@ -284,7 +274,7 @@ def draw(ax, df, metric, title, norm, labels=True, ylabel=True, partial_ring=Fal
     ax.set_ylim(df["cauchy_edgewise"].min() / 1.5, df["cauchy_edgewise"].max() * 1.7)
     if ylabel:
         ax.set_ylabel(r"$Ca_e$", color=INK)
-    if FONT_SCALE > 1.2:          # large text: "150,000" and "200,000" collide, so label in units of 1e5
+    if fs(1) > 1.2:               # large text: "150,000" and "200,000" collide, so label in units of 1e5
         ticks = [6e4, 1e5, 2e5, 3e5]
         ax.set_xlabel(r"$Re \;\; (\times 10^5)$", color=INK)
         ax.set_xticks(ticks)
@@ -300,12 +290,7 @@ def draw(ax, df, metric, title, norm, labels=True, ylabel=True, partial_ring=Fal
         ax.set_title(txt(title), loc="left", fontsize=fs(11), color=INK)
     ax.set_facecolor(SURFACE)
     ax.set_axisbelow(True)
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
-    for s in ("left", "bottom"):         # black, slightly heavy: the figures go on slides
-        ax.spines[s].set_color(INK)
-        ax.spines[s].set_linewidth(1.2)
-    ax.tick_params(colors=INK, width=1.2, which="both")
+    style_axes(ax)
 
 
 CANDIDATES = [(10, 6, "left", "bottom"), (10, -6, "left", "top"), (-10, 6, "right", "bottom"),
@@ -388,7 +373,7 @@ def flag_figure(df, regions, sid, args, out):
     name = "design_space_flag_" + "_".join(regions) + (f"_S{sid}" if sid else "") + \
         ("_fullonly" if args.full_only else "")
     png = out / f"{name}.png"
-    fig.savefig(png, dpi=args.dpi, facecolor=SURFACE)
+    fig.savefig(png, dpi=args.dpi, facecolor="none" if args.transparent else SURFACE, transparent=args.transparent)
     plt.close(fig)
 
     cols = ["run_name", "reynolds_number", "cauchy_edgewise"] + \
@@ -433,19 +418,9 @@ def main():
     ap.add_argument("--no-labels", action="store_true", help="hide dataset names")
     ap.add_argument("--no-squares", action="store_true", help="draw every run as a circle (no clipping marker)")
     ap.add_argument("--no-title", action="store_true", help="leave out the panel titles")
-    ap.add_argument("--latex", action="store_true", help="typeset all text with LaTeX (needs latex on PATH)")
-    ap.add_argument("--fontsize", type=float, default=10.0,
-                    help="base font size (default 10); titles, legends and labels scale with it")
+    add_style_args(ap)
     args = ap.parse_args()
-    global FONT_SCALE
-    FONT_SCALE = args.fontsize / 10.0
-    plt.rcParams["font.size"] = args.fontsize
-    if args.latex:
-        if not shutil.which("latex"):
-            raise SystemExit("--latex needs a LaTeX installation (latex on PATH)")
-        global USETEX
-        USETEX = True
-        plt.rcParams.update({"text.usetex": True, "font.family": "serif"})
+    apply_style(args)
 
     panels = ["max", "p90"] if args.panels == "both" else [p.strip() for p in args.panels.split(",") if p.strip()]
     bad = [p for p in panels if p not in METRICS]
@@ -573,7 +548,7 @@ def main():
     if args.cbar == "linear":
         name += "_linear"
     png = out / f"{name}.png"
-    fig.savefig(png, dpi=args.dpi, facecolor=SURFACE)
+    fig.savefig(png, dpi=args.dpi, facecolor="none" if args.transparent else SURFACE, transparent=args.transparent)
     plt.close(fig)
 
     cols = ["run_name", "reynolds_number", "cauchy_edgewise", "nvar_max", "nvar_max_angle_deg",
