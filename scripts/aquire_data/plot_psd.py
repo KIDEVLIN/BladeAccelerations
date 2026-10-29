@@ -85,6 +85,8 @@ Options
     --track                map mode: mark the dominant-peak frequency at angles whose variance is >= 3x the median
     --vmin / --vmax        map colour limits (default 1st and 99.9th percentile of the PSD)
     --chord M              average chord for St (default 0.0138)
+    --no-title             leave out the title (all modes). The run, region and run counts are then not on the figure;
+                           the legend still gives the counts, and the csv has the details
     --transparent / --no-transparent   PNG background: transparent (default) or the off-white of earlier versions.
                            The text and lines are dark, so a transparent PNG belongs on a light slide background
     --box / --no-box       frame all four sides of the plot (default: box)
@@ -286,8 +288,9 @@ def fig_map(run, D, info, args, out):
                                                   else rf"$\mathrm{{Var}}(a_{args.component})/a_c^2$"), color=INK)
     style_axes(ax1)
     ax1.tick_params(labelbottom=False)
-    ax1.set_title(conditions_line(run, info) + f"   ·   S{args.sensor_id} {band_label(args)}", loc="left",
-                  fontsize=fs(11), color=INK)
+    if not args.no_title:
+        ax1.set_title(conditions_line(run, info) + f"   ·   S{args.sensor_id} {band_label(args)}", loc="left",
+                      fontsize=fs(11), color=INK)
 
     pm = ax2.pcolormesh(th2, x[m], S2[:, m].T, shading="nearest", cmap=CMAP, norm=LogNorm(vmin, vmax),
                         rasterized=True)
@@ -373,8 +376,9 @@ def fig_spectra(run, D, info, args, out):
     style_axes(ax)
     ax.grid(True, which="minor", color="#efeeea", linewidth=0.5, zorder=0)
     ax.legend(loc="upper right", frameon=False, fontsize=fs(9), labelcolor=INK)
-    ax.set_title(conditions_line(run, info) + f"   ·   S{args.sensor_id} {band_label(args)}", loc="left",
-                 fontsize=fs(11), color=INK)
+    if not args.no_title:
+        ax.set_title(conditions_line(run, info) + f"   ·   S{args.sensor_id} {band_label(args)}", loc="left",
+                     fontsize=fs(11), color=INK)
     save(fig, out, args.dpi)
     pd.DataFrame(rows).to_csv(out.with_suffix(".csv"), index=False)
     tab.to_csv(out.with_name(out.stem + "_values.csv"), index=False)
@@ -504,8 +508,9 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
     if flags:
         nt = sum(f is True for f, _ in used)
         note = f"   ·   region {args.region_name}: {nt} of {len(used)} runs with a peak"
-    ax.set_title(f"S{args.sensor_id} {band_label(args)}   ·   PSD {where}\n{len(used)} runs" + note,
-                 loc="left", fontsize=fs(11), color=INK)
+    if not args.no_title:
+        ax.set_title(f"S{args.sensor_id} {band_label(args)}   ·   PSD {where}\n{len(used)} runs" + note,
+                     loc="left", fontsize=fs(11), color=INK)
     handles = []
     if by_flag:
         n_t = sum(f is True for f, _ in used)
@@ -578,6 +583,7 @@ def main():
     ap.add_argument("--vmax", type=float)
     ap.add_argument("--chord", type=float, default=0.0138)
     ap.add_argument("--out")
+    ap.add_argument("--no-title", action="store_true")
     add_style_args(ap)
     ap.add_argument("--dpi", type=int, default=200)
     args = ap.parse_args()
