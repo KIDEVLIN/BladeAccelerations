@@ -1,0 +1,235 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[hidelinks]{hyperref}
+\emergencystretch=3em
+
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{Ring-down tests of the DTU10MW blade with and without the mount bolt}
+\author{Ilan Upfal}
+\date{29 October 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Summary}
+
+On 21 October we flicked the blade tip and recorded the ring-down twice: first
+with the mount bolt missing, then with it fitted. This note compares the two
+and asks which one describes the production experiments of 6--15 October.
+
+\begin{enumerate}
+  \item \textbf{Without the bolt every low mode is lower.} The first flap mode
+        drops from 62 to 55\,Hz ($-11\%$), the second flap mode from 162 to
+        131\,Hz ($-19\%$), and the first edge mode from 117 to 85\,Hz
+        ($-27\%$). Higher modes move by 5\% or less.
+  \item \textbf{The production runs match the no-bolt blade.} In the slowest
+        runs, at the angles where the blade barely vibrates, the spectra peak
+        at 84--86 and 131--133\,Hz on every test day with such a run (6, 9 and
+        14 October). There is nothing at the bolted 117 or 162\,Hz. The bolt
+        was most likely missing for the whole campaign, and the no-bolt
+        frequencies are the ones to compare the experiments with.
+  \item \textbf{In the tunnel the 131\,Hz mode moves mostly edgewise.} In the
+        ring-down it is a flapwise mode. Its frequency carries over to the
+        experiments but its direction does not, so it is best referred to by
+        frequency.
+  \item \textbf{At high speed the blade responds at neither configuration's
+        frequencies.} At 6.9\,m/s the 85 and 131\,Hz peaks give way to a
+        single peak at 109--111\,Hz. The ring-down frequencies describe the
+        blade at low speed only.
+\end{enumerate}
+
+\section{The tests}
+
+Both runs used the experiment mount at the experiment settings (mounting
+angle $84.1^\circ$, sweep $-30^\circ$), in still air. The blade tip was
+flicked by hand, either flapwise or edgewise, and each flick was recorded for
+10\,s with all four accelerometers. One 10\,s capture with no flick gives the
+noise floor.
+
+\begin{center}
+\begin{tabular}{lccc}
+  \toprule
+  Run & Time (21 Oct) & Flap flicks & Edge flicks \\
+  \midrule
+  \code{DTU10MW\_rigid4k\_ringdown\_NOBOLT} & 14:19--14:55 & 31 & 30 \\
+  \code{DTU10MW\_rigid4k\_ringdown}         & 15:09--15:35 & 30 & 30 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+This note uses sensor~4, nearest the tip, which moves the most. Its $y$ axis
+is edgewise and its $z$ axis flapwise: flap flicks ring mostly in $z$ and
+edge flicks mostly in $y$. The $x$ axis is spanwise and barely moves.
+
+\paragraph{Analysis.} The spectra are made as in
+\code{plot\_ringdown\_psd.py}. Each sample is placed on the sensor's actual
+1493\,Hz sample grid, and the samples our read loop drops are left as gaps
+(\code{reports/accel\_sampling}, \code{reports/pcb\_manual\_notes}). Each
+flick gives a Welch PSD from the onset of the ring-down (segments of 2048,
+0.73\,Hz resolution), and the median over all flicks of one kind is shown.
+The gaps make weak copies of every peak at $\pm14.9$\,Hz; peaks that sit at a
+copy position of a stronger peak are not counted as modes. Frequencies above
+about 150\,Hz are uncertain by up to one copy spacing (15\,Hz), because they
+depend on the exact sample rate.
+
+\section{Results}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{figs/ringdown_compare.pdf}
+  \caption{Median PSD of sensor~4, with the bolt (blue) and without (red).
+  Rows: flap flicks, edge flicks. Columns: edgewise ($y$) and flapwise ($z$)
+  axes. Triangles mark the three largest peaks of each curve after the
+  batch-gap copies are removed. Grey: no-flick capture.}
+  \label{fig:compare}
+\end{figure}
+
+Figure~\ref{fig:compare} shows the spectra and Table~\ref{tab:modes} the
+modes. A mode's direction is the axis it is largest in and the flick that
+rings it hardest.
+
+\begin{table}[h]
+  \centering
+  \begin{tabular}{lcccl}
+    \toprule
+    Mode & Bolted (Hz) & No bolt (Hz) & Change & Main axis \\
+    \midrule
+    1st flap  & 62  & 55  & $-11\%$ & $z$ \\
+    1st edge  & 117 & 85  & $-27\%$ & $y$ \\
+    2nd flap  & 162 & 131 & $-19\%$ & $z$ \\
+    2nd edge  & 294 & 279 & $-5\%$  & $y$ \\
+    flap, $\sim$400\,Hz & 408 & 401 & $-2\%$ & $z$ \\
+    edge, $\sim$550\,Hz & 536 & 555 & $+4\%$ & $y$ \\
+    \bottomrule
+  \end{tabular}
+  \caption{Sensor~4 modes. The bolted run also has a weak flapwise peak at
+  259\,Hz and the no-bolt run a weak peak at 361\,Hz; neither has a clear
+  partner in the other run. The two highest modes are uncertain by about
+  15\,Hz.}
+  \label{tab:modes}
+\end{table}
+
+\paragraph{The bolt matters most for the low modes.} The three lowest modes
+drop by 11--27\%; the higher ones by 5\% or less, within the uncertainty of
+those peaks. This is what a softer root joint would do: the low modes swing
+the whole blade about its root, while the higher modes bend the blade itself.
+The first edge mode is the most affected.
+
+\paragraph{The flicks are not pure.} In both runs an edge flick also rings
+the first flap mode strongly in $z$, and without the bolt a flap flick rings
+the first edge mode in $y$ only about half as strongly as the first flap mode
+in $z$.
+The directions in Table~\ref{tab:modes} are where each mode is largest, not
+the only place it appears.
+
+\paragraph{Agreement with the high-speed video.} The video of a flapwise
+ring-down gave 62.7 and 164.5\,Hz for the first two flap modes
+(\code{reports/accel\_sampling}, \code{reports/pcb\_manual\_notes}), which
+matches the bolted run.
+
+\section{Which configuration the experiments had}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{figs/production_slow.pdf}
+  \caption{Sensor~4 PSD of the three slowest production runs (2.5--2.6\,m/s),
+  median over the third of each run's angles with the least vibration, so the
+  flow only nudges the blade. Dashed red: no-bolt modes; dotted blue: bolted
+  modes.}
+  \label{fig:production}
+\end{figure}
+
+In the experiments the flow excites the blade continuously. At low speed and
+at the angles where the blade is quiet, that excitation is gentle and the
+spectrum shows the blade's own frequencies, much as a ring-down does.
+Figure~\ref{fig:production} shows these spectra for the three slowest runs,
+at 33, 51 and 58\,kg/m$^3$, recorded on 6, 14 and 9 October.
+
+All three peak at 84--86\,Hz and 131--133\,Hz in both axes: the no-bolt first
+edge and second flap modes. None shows a peak at the bolted 117 or 162\,Hz.
+Since the slow runs span the campaign, the bolt was most likely missing
+throughout, not lost partway. The order of the two ring-downs fits this: the
+no-bolt run was recorded first, and the bolted one an hour later.
+
+One difference stands out. In the ring-down, the 131\,Hz mode is four to
+five times stronger in $z$ than in $y$. In these runs it is about two to four
+times stronger in $y$. So in the tunnel this mode moves mostly
+edgewise, whether because the pressurized gas and flow change its shape or
+because a different motion happens to sit at the same frequency. Plots of the
+experiments should mark it by frequency (131\,Hz), not as a flapwise mode.
+
+The peaks near 300\,Hz in Figure~\ref{fig:production} (301--310\,Hz) sit
+between the no-bolt (279\,Hz) and bolted (294\,Hz) second edge mode, within
+the uncertainty of that frequency, so they do not tell the two apart.
+
+\paragraph{At high speed the ring-down frequencies no longer describe the
+blade.} Figure~\ref{fig:fast} repeats Figure~\ref{fig:production} for the
+fastest run at each of the same three pressures. Even at the quietest angles
+the spectrum is now about ten times higher, and the 85 and 131\,Hz peaks
+have all but gone. At 6.9\,m/s both axes show a single peak at
+109--111\,Hz, which matches neither no-bolt mode: the PSD there is about ten
+times that at 85\,Hz and three times that at 131\,Hz. The 6.0\,m/s run sits
+in between, with two peaks (95--96 and 122--125\,Hz), each pulled from a
+no-bolt mode toward 110\,Hz. The 110\,Hz peak is also 6--7\% below the
+bolted first edge mode (117\,Hz), so it is not the bolted blade either.
+
+So the ring-down modes describe the blade at low speed only. At speed the
+flow changes the frequencies the blade responds at, and the experiments
+cannot be read against the ring-down frequencies alone. One explanation
+consistent with Figure~\ref{fig:fast} is that the flow couples the 85 and
+131\,Hz modes and draws them together as the speed rises; the three runs
+here are not enough to show it.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{figs/production_fast.pdf}
+  \caption{As Figure~\ref{fig:production}, for the fastest run at each
+  pressure (6.0--6.9\,m/s; 605\,psi went only to 6.0\,m/s), on the same
+  scale.}
+  \label{fig:fast}
+\end{figure}
+
+\section{Caveats}
+
+\begin{itemize}
+  \item We assume both ring-downs were done at atmospheric pressure, with the
+        tunnel not pressurized. The experiments ran in gas 27--95 times
+        denser. A rough flat-plate estimate puts the effect of the heavier gas
+        on the flap modes at a few percent (more at 1414\,psi) and on the
+        edge modes at under 1\%, but this has not been measured.
+  \item The flicks were by hand, so their direction and strength vary. The
+        median over 30 flicks takes care of the strength, not the direction.
+  \item Only sensor~4 is shown. The other sensors give the same low-mode
+        frequencies.
+  \item The sample rate (1493\,Hz) comes from the vendor's measurement, not
+        from our data. The low modes do not depend on it; the modes above
+        150\,Hz move by up to 15\,Hz with it.
+\end{itemize}
+
+\section{Recommendations}
+
+\begin{enumerate}
+  \item \textbf{Use the no-bolt frequencies for the production runs.}
+        \code{plot\_psd.py} now draws 55, 85, 131, 279 and 401\,Hz as the
+        natural frequencies (\code{NATURAL\_HZ}).
+  \item \textbf{Record the mount state in \code{run\_metadata.json}} (bolt
+        fitted, torque), and check it at the start of each test day.
+  \item \textbf{Repeat the no-bolt ring-down in the pressurized tunnel with
+        the fans off,} at one low and one high pressure (e.g.\ 385 and
+        1414\,psi). Any shift from 85 and 131\,Hz is then the effect of the
+        gas alone.
+  \item \textbf{Decide whether future runs use the bolt.} The two
+        configurations give different natural frequencies, so runs with and
+        without it should not be mixed.
+\end{enumerate}
+
+\paragraph{Reproducing.} \code{python3 reports/ringdown/make\_figures.py}
+from the repository root writes both figures and prints every number quoted
+here. It needs the two ring-down folders in \code{data/} and the production
+summaries from \code{extract\_run\_summary.py}~1.4.
+
+\end{document}

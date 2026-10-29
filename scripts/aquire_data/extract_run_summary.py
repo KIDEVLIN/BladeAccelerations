@@ -36,6 +36,9 @@ spectra.npz keys (i = angle index, same order as angle_summary.csv):
     csd_load_force_i, csd_load_moment_i   (6, nf) complex cross-spectra xx yy zz xy xz yz of the force and
                                     moment triads, so PSDs in a rotated load-cell frame follow later as R S R^T
                                     (skip with --no-csd). All Welch, nperseg=--nperseg, constant detrend.
+    Accel PSDs (1.3+) place each sample on the ODR grid (contiguous within its FIFO batch, dropped
+    samples masked), so f_accel runs to ODR/2 and each peak has weak copies at +/- n * accel_batch_hz
+    (~15 Hz); see scripts/data_analysis/accel_spectra.py.
 
 Normalization (per run, from MEASURED conditions in run_metadata.json):
     F_c   = 0.5 * rho * U^2 * c_avg * b            (characteristic force, N)
@@ -69,7 +72,14 @@ from utils.run_loader import (  # noqa: E402
 )
 from utils import coordinate_transforms as ct  # noqa: E402
 
-EXTRACTOR_VERSION = "1.2"   # 1.1: per-axis nvar_s{k}_{x,y,z}; 1.2: per-axis PSDs (accel + load cell) and load-cell CSDs
+sys.path.insert(0, str(HERE.parent / "data_analysis"))
+from accel_spectra import MEASURED_ODR_HZ, batch_grid, batch_rate_hz, gridded_psd, read_header_odr  # noqa: E402
+
+# 1.1: per-axis nvar_s{k}_{x,y,z}; 1.2: per-axis PSDs (accel + load cell) and load-cell CSDs;
+# 1.3: accel PSDs on the ODR sample grid with the dropped samples masked (were evenly spaced at the
+#      delivered ~1250 Hz, which put every frequency ~22% low), accel_batch_hz / accel_spectrum_odr_hz columns;
+# 1.4: that grid at the measured 1493 Hz sensor rate instead of the configured 1600 Hz ODR
+EXTRACTOR_VERSION = "1.4"
 
 G = 9.80665
 NUM_SENSORS = 4
@@ -187,10 +197,18 @@ def analyze_angle(i, angle_val, accel_path, load_path, info, meta_rows, enc, arg
     row["accel_peak_g"] = float(np.abs(raw).max() * mg / 1000.0) if n else np.nan
     row["accel_touched_max"] = bool((frac > 0).any())   # any sample at all (below warn threshold)
 
-    odr = info["accel_odr_hz"]
+    odr = info["accel_odr_hz"] or read_header_odr(accel_path)
     row["accel_rate_low"] = bool(odr and fs_acc < 0.9 * odr)
     if row["accel_rate_low"]:
         notes.append(f"measured accel rate {fs_acc:.0f} Hz < 90% of ODR {odr} Hz (dropped samples?)")
+
+    # Spectra: samples on the ODR grid, contiguous within each FIFO batch, dropped samples masked
+    # (see scripts/data_analysis/accel_spectra.py). The gaps add copies of each peak at
+    # +/- n * accel_batch_hz.
+    odr_spec = args.accel_odr_hz
+    grid = batch_grid(accel_df["batch_time"].to_numpy(dtype=float), odr_spec) if n else np.array([], int)
+    row["accel_spectrum_odr_hz"] = odr_spec
+    row["accel_batch_hz"] = batch_rate_hz(accel_df["batch_time"].to_numpy(dtype=float)) if n else np.nan
 
     # ---- accel variance / spectra ----
     keep = t >= args.trim_s
@@ -213,12 +231,12 @@ def analyze_angle(i, angle_val, accel_path, load_path, info, meta_rows, enc, arg
             row[f"var_g2_s{s + 1}_{ax_name}"] = vj
             row[f"nvar_s{s + 1}_{ax_name}"] = vj / a_c ** 2 if math.isfinite(a_c) and a_c > 0 else np.nan
         if len(x) >= 16 and math.isfinite(fs_acc):
-            f, p = welch(x - x.mean(), fs=fs_acc, nperseg=nper)
+            f, p = gridded_psd(x, grid[keep], odr_spec, nper)
             pk_f, pk_p = spectrum_peak(f, p, args.min_peak_hz)
             psd_acc.append(p)
             for j, ax_name in enumerate("xyz"):
                 xa = acc_g[keep, s, j]
-                _, pa = welch(xa - xa.mean(), fs=fs_acc, nperseg=nper)
+                _, pa = gridded_psd(xa, grid[keep], odr_spec, nper)
                 psd_axes[s, j] = pa
                 row[f"peak_hz_s{s + 1}_{ax_name}"], row[f"peak_psd_s{s + 1}_{ax_name}"] = \
                     spectrum_peak(f, pa, args.min_peak_hz)
@@ -409,6 +427,9 @@ def main():
     ap.add_argument("--nperseg", type=int, default=2048, help="Welch segment length")
     ap.add_argument("--min-peak-hz", type=float, default=5.0,
                     help="lowest frequency considered when picking a spectral peak")
+    ap.add_argument("--accel-odr-hz", type=float, default=MEASURED_ODR_HZ,
+                    help=f"actual accelerometer sample rate for the spectra's sample grid (default: the measured "
+                         f"{MEASURED_ODR_HZ:g} Hz, not the configured ODR from run_metadata.json)")
     ap.add_argument("--no-csd", action="store_true",
                     help="skip the load-cell cross-spectra (smaller spectra.npz; no later frame rotation of PSDs)")
     ap.add_argument("--chord-avg-m", type=float, default=DEFAULTS["chord_avg_m"])

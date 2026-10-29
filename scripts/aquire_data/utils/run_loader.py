@@ -129,9 +129,15 @@ def load_accel_csv(path):
 
     The accelerometer sensitivity from the CSV header is stored in
     df.attrs["mg_per_lsb"] (absent if the header has none); use
-    variance_analysis.accel_mg_per_lsb(df) to read it with the 2g fallback."""
+    variance_analysis.accel_mg_per_lsb(df) to read it with the 2g fallback.
+
+    The original per-batch timestamps are kept in a "batch_time" column:
+    spectra need them to place samples on the ODR grid (see
+    scripts/data_analysis/accel_spectra.py), since the reconstructed
+    "time" spaces each batch evenly at the delivered rate."""
     t_start = _read_header_t_start(path)
     df = pd.read_csv(path, comment="#")
+    df["batch_time"] = df["time"]
     df = _reconstruct_batch_times(df)
     mg_per_lsb = _read_header_mg_per_lsb(path)
     if mg_per_lsb is not None:

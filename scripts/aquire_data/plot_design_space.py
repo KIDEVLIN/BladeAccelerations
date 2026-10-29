@@ -54,6 +54,10 @@ Options
     --angles PATH       master_angles.csv (default: next to master_runs.csv)
     --metrics PATH      master_metrics.csv (default: next to master_runs.csv; master_metrics_S4.csv with --sensor S4)
     --no-labels         hide the dataset names (e.g. 390/300)
+    --no-squares        draw every run as a circle, without the clipped-angle square
+    --no-title          leave out the panel titles
+    --fontsize N        base font size in points (default 10); titles, legends and labels scale with it
+    --latex             typeset all text with LaTeX (serif, needs latex on PATH)
     --out DIR, --dpi N
 
 Outputs (in --out, default <master_runs folder>/figures):
@@ -74,6 +78,7 @@ Requires: numpy pandas matplotlib
 
 import argparse
 import re
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -88,7 +93,6 @@ from matplotlib.lines import Line2D                              # noqa: E402
 INK = "#1a1a19"
 MUTED = "#6b6b66"
 SURFACE = "#fcfcfb"
-GRID = "#e4e3df"
 CMAP = plt.get_cmap("turbo")      # identical to MATLAB's turbo
 
 VAR_LABEL = r"Normalized acceleration variance   $\mathrm{Var}(|a|)/a_c^2$"
@@ -104,6 +108,24 @@ METRICS = {
 NEEDED = ["run_name", "nominal_psi", "fan_setting", "version", "reynolds_number",
           "cauchy_edgewise", "nvar_max", "nvar_p90", "n_accel_clipped"]
 FLAG_TRUE, FLAG_FALSE = "#d55e00", "#dcdbd6"     # peak (vermillion) vs no peak (light grey)
+FONT_SCALE = 1.0                                  # --fontsize / 10, set in main()
+
+
+USETEX = False                                    # --latex, set in main()
+_TEX = {"–": "--", "≥": r"$\geq$", "×": r"$\times$", "°": r"$^\circ$"}
+
+
+def fs(size):
+    """Font size scaled by --fontsize (default 10 = sizes as written)."""
+    return size * FONT_SCALE
+
+
+def txt(s):
+    """Text as written, or with the unicode symbols LaTeX cannot typeset replaced when --latex is on."""
+    if USETEX:
+        for a, b in _TEX.items():
+            s = s.replace(a, b)
+    return s
 REGION_COL = re.compile(r"^(flag|max|angle|ratio)_(r-?\d+)$")
 FROM_METRICS = ["excess_mean_full", "vibrating_width_deg", "nvar_p90_weighted", "full_sweep",
                 "baseline", "baseline_reliable", "threshold"]
@@ -260,23 +282,30 @@ def draw(ax, df, metric, title, norm, labels=True, ylabel=True, partial_ring=Fal
     ax.set_yscale("log")
     ax.set_xlim(df["reynolds_number"].min() / 1.25, df["reynolds_number"].max() * 1.9)
     ax.set_ylim(df["cauchy_edgewise"].min() / 1.5, df["cauchy_edgewise"].max() * 1.7)
-    ax.set_xlabel(r"$Re=\rho U \bar{c}/\mu$", color=INK)
     if ylabel:
-        ax.set_ylabel(r"$Ca_e=\rho U^2 b^4/B_e$", color=INK)
-    ticks = [6e4, 1e5, 1.5e5, 2e5, 3e5]
-    ax.set_xticks(ticks)
-    ax.set_xticklabels([f"{t:,.0f}" for t in ticks])
+        ax.set_ylabel(r"$Ca_e$", color=INK)
+    if FONT_SCALE > 1.2:          # large text: "150,000" and "200,000" collide, so label in units of 1e5
+        ticks = [6e4, 1e5, 2e5, 3e5]
+        ax.set_xlabel(r"$Re \;\; (\times 10^5)$", color=INK)
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([f"{t / 1e5:g}" for t in ticks])
+    else:
+        ticks = [6e4, 1e5, 1.5e5, 2e5, 3e5]
+        ax.set_xlabel(r"$Re$", color=INK)
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([f"{t:,.0f}" for t in ticks])
     ax.minorticks_off()
     ax.tick_params(labelleft=True)
-    ax.set_title(title, loc="left", fontsize=11, color=INK)
+    if title:
+        ax.set_title(txt(title), loc="left", fontsize=fs(11), color=INK)
     ax.set_facecolor(SURFACE)
-    ax.grid(True, which="major", color=GRID, linewidth=0.8, zorder=0)
     ax.set_axisbelow(True)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
-    for s in ("left", "bottom"):
-        ax.spines[s].set_color(MUTED)
-    ax.tick_params(colors=MUTED, which="both")
+    for s in ("left", "bottom"):         # black, slightly heavy: the figures go on slides
+        ax.spines[s].set_color(INK)
+        ax.spines[s].set_linewidth(1.2)
+    ax.tick_params(colors=INK, width=1.2, which="both")
 
 
 CANDIDATES = [(10, 6, "left", "bottom"), (10, -6, "left", "top"), (-10, 6, "right", "bottom"),
@@ -307,8 +336,8 @@ def place_labels(fig, ax):
     for x, y, text in ax._label_specs:
         best = None
         for dx, dy, ha, va in CANDIDATES:
-            t = ax.annotate(text, (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha,
-                            va=va, fontsize=8, color=INK, zorder=4)
+            t = ax.annotate(txt(text), (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha,
+                            va=va, fontsize=fs(8), color=INK, zorder=4)
             bb = t.get_window_extent(renderer)
             if not hits(bb):
                 best = bb
@@ -316,8 +345,8 @@ def place_labels(fig, ax):
             t.remove()
         if best is None:                          # nothing free: fall back to the first candidate
             dx, dy, ha, va = CANDIDATES[0]
-            t = ax.annotate(text, (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha,
-                            va=va, fontsize=8, color=INK, zorder=4)
+            t = ax.annotate(txt(text), (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha,
+                            va=va, fontsize=fs(8), color=INK, zorder=4)
             best = t.get_window_extent(renderer)
         placed.append(best)
 
@@ -337,6 +366,8 @@ def flag_figure(df, regions, sid, args, out):
         title = (f"Peak in {w[0]:g}–{w[1]:g}° motor angle" if w else f"Peak region {r}") \
             + (f" (S{sid})" if sid else "") \
             + f"\n{nt} of {nt + nf} measured runs flagged" + (f", {nu} not measured" if nu else "")
+        if args.no_title:
+            title = None
         draw(ax, df, f"flag_{r}", title, None, labels=(not args.no_labels and i == 0), ylabel=(i == 0), flag=True)
     handles = [
         Line2D([], [], marker="o", ls="", ms=9, mfc=FLAG_TRUE, mec=INK, mew=0.7,
@@ -349,7 +380,9 @@ def flag_figure(df, regions, sid, args, out):
     if df["clipped"].any():
         handles.append(Line2D([], [], marker="s", ls="", ms=9, mfc="#bdbdb8", mec=INK, mew=0.7,
                               label=f"square: ≥1 angle with {'S%d ' % sid if sid else ''}clipped (variance is a lower bound)"))
-    axes[0].legend(handles=handles, loc="upper left", frameon=False, fontsize=8.5, labelcolor=INK)
+    for h in handles:
+        h.set_label(txt(h.get_label()))
+    axes[0].legend(handles=handles, loc="upper left", frameon=False, fontsize=fs(8.5), labelcolor=INK)
     if not args.no_labels:
         place_labels(fig, axes[0])
     name = "design_space_flag_" + "_".join(regions) + (f"_S{sid}" if sid else "") + \
@@ -398,7 +431,21 @@ def main():
     ap.add_argument("--separate-cbars", action="store_true")
     ap.add_argument("--full-only", action="store_true", help="plot only full-sweep runs")
     ap.add_argument("--no-labels", action="store_true", help="hide dataset names")
+    ap.add_argument("--no-squares", action="store_true", help="draw every run as a circle (no clipping marker)")
+    ap.add_argument("--no-title", action="store_true", help="leave out the panel titles")
+    ap.add_argument("--latex", action="store_true", help="typeset all text with LaTeX (needs latex on PATH)")
+    ap.add_argument("--fontsize", type=float, default=10.0,
+                    help="base font size (default 10); titles, legends and labels scale with it")
     args = ap.parse_args()
+    global FONT_SCALE
+    FONT_SCALE = args.fontsize / 10.0
+    plt.rcParams["font.size"] = args.fontsize
+    if args.latex:
+        if not shutil.which("latex"):
+            raise SystemExit("--latex needs a LaTeX installation (latex on PATH)")
+        global USETEX
+        USETEX = True
+        plt.rcParams.update({"text.usetex": True, "font.family": "serif"})
 
     panels = ["max", "p90"] if args.panels == "both" else [p.strip() for p in args.panels.split(",") if p.strip()]
     bad = [p for p in panels if p not in METRICS]
@@ -418,6 +465,8 @@ def main():
         if not apath.exists():
             raise SystemExit(f"--sensor needs {apath} (or pass --angles)")
         df = apply_sensor(df, apath, sid)
+    if args.no_squares:
+        df["clipped"] = False         # every marker a circle; the clipping legend entry drops out too
 
     # metrics that depend on the chosen sensor (weighted p90, excess, width) vs the sweep coverage only
     needs_sensor_metrics = (args.p90 == "weighted" and "p90" in panels
@@ -485,18 +534,18 @@ def main():
                              facecolor=SURFACE, constrained_layout=True, squeeze=False)
     axes = list(axes[0])
     for i, (ax, p) in enumerate(zip(axes, panels)):
-        draw(ax, df, METRICS[p]["col"], titles[p], norm_of[p], labels=(not args.no_labels and i == 0),
+        draw(ax, df, METRICS[p]["col"], None if args.no_title else titles[p], norm_of[p], labels=(not args.no_labels and i == 0),
              ylabel=(i == 0), partial_ring=METRICS[p]["kind"] in ("excess", "width"))
 
     for key, ps in groups.items():
         axs = [axes[panels.index(p)] for p in ps]
         sm = plt.cm.ScalarMappable(norm=norms[key], cmap=CMAP)
         cb = fig.colorbar(sm, ax=axs, shrink=0.85, pad=0.015)
-        cb.set_label(METRICS[ps[0]]["cbar"], color=INK)
-        cb.outline.set_edgecolor(MUTED)
-        cb.ax.tick_params(colors=MUTED, which="both")
+        cb.set_label(txt(METRICS[ps[0]]["cbar"]), color=INK)
+        cb.outline.set_edgecolor(INK)
+        cb.ax.tick_params(colors=INK, which="both")
 
-    handles = [
+    handles = [] if args.no_squares else [
         Line2D([], [], marker="o", ls="", ms=9, mfc="#bdbdb8", mec=INK, mew=0.7, label="no clipped angles"),
         Line2D([], [], marker="s", ls="", ms=9, mfc="#bdbdb8", mec=INK, mew=0.7,
                label=(f"≥1 angle with S{sid} clipped" if sid else "≥1 clipped angle") + " (value is a lower bound)"),
@@ -505,7 +554,9 @@ def main():
             and (df["full_sweep"] == False).any():                                   # noqa: E712
         handles.append(Line2D([], [], marker="o", ls="", ms=11, mfc="none", mec=MUTED, mew=1.0,
                               label="partial sweep (value is a lower bound)"))
-    axes[0].legend(handles=handles, loc="upper left", frameon=False, fontsize=8.5, labelcolor=INK)
+    for h in handles:
+        h.set_label(txt(h.get_label()))
+    axes[0].legend(handles=handles, loc="upper left", frameon=False, fontsize=fs(8.5), labelcolor=INK)
 
     if not args.no_labels:
         place_labels(fig, axes[0])

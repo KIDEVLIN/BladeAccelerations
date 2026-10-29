@@ -71,6 +71,15 @@ Options
     --track                map mode: mark the dominant-peak frequency at angles whose variance is >= 3x the median
     --vmin / --vmax        map colour limits (default 1st and 99.9th percentile of the PSD)
     --chord M              average chord for St (default 0.0138)
+    --no-modes             spectra and runs modes: leave out the ring-down natural frequencies (NATURAL_HZ), which are
+                           otherwise drawn as dashed lines on the PSD and across the peak-frequency panel (Hz only).
+                           The plotted direction's modes are dark, the other direction's light.
+    --ylim LO HI           spectra and runs modes: fixed PSD y limits, so several figures share one scale
+    --peak-ylim LO HI      runs mode: fixed y limits of the peak-frequency panel
+                           Edgewise vs flapwise: --component y is edgewise, z flapwise (S4, from the ring-down tests),
+                           and every label says which. Same scales for the two:
+                               python plot_psd.py Production_summaries --mode runs --run all --region 120 --component z \
+                                   --flag-false grey --ylim 3e-7 5e-2 --peak-ylim 50 270
     --out DIR, --dpi N
 
 Outputs (default <summaries>/figures): a PNG and CSVs with the plotted numbers (peak tables; spectra values).
@@ -89,7 +98,7 @@ import matplotlib.pyplot as plt                                   # noqa: E402
 from matplotlib.colors import LogNorm, Normalize                  # noqa: E402
 from matplotlib.cm import ScalarMappable                          # noqa: E402
 from matplotlib.lines import Line2D                               # noqa: E402
-from matplotlib.ticker import MultipleLocator                     # noqa: E402
+from matplotlib.ticker import MultipleLocator, NullLocator        # noqa: E402
 from scipy.ndimage import uniform_filter1d                        # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -102,6 +111,12 @@ AXES = ("x", "y", "z")
 CMAP = "turbo"
 GREY_LINE = "#b5b4ae"       # curves of runs without a peak in the chosen region (greyed or flag-coloured)
 MAX_GAP_DEG = 20.0          # holes in the angle sampling larger than this are left blank in the map
+DIRECTION = {"y": "edgewise", "z": "flapwise"}   # S4 axes, from the ring-down flicks (x is spanwise)
+# Natural frequencies (Hz) from the ring-down tip flicks WITHOUT the mount bolt, as in the production runs
+# (data/DTU10MW_rigid4k_ringdown_NOBOLT/analysis_psd/ringdown_top_peaks.csv): S4 median PSD on the measured
+# 1493 Hz sample grid, batch-gap copies dropped. Modes above ~150 Hz are known to about +-1 copy (15 Hz); see
+# reports/pcb_manual_notes/. With the bolt (DTU10MW_rigid4k_ringdown) they were 62/162/259/408 and 117/294/536.
+NATURAL_HZ = {"flapwise": (55.0, 131.0, 401.0), "edgewise": (85.0, 279.0, 555.0)}
 
 
 # --------------------------------------------------
@@ -193,7 +208,52 @@ def xlabel(args):
 
 
 def band_label(args):
+    if args.component in DIRECTION:
+        return f"{DIRECTION[args.component]} ({args.component}-axis)"
     return "|a|" if args.component == "mag" else f"{args.component}-axis"
+
+
+def direction_prefix(args):
+    """'Edgewise  ' / 'Flapwise  ' for axis labels, '' for |a| and x."""
+    return f"{DIRECTION[args.component].capitalize()}  " if args.component in DIRECTION else ""
+
+
+def draw_modes(ax, args, horizontal=False):
+    """Ring-down natural frequencies as reference lines: vertical on a PSD (labelled on a top axis, clear of
+    the curves), horizontal on a peak-frequency panel. Modes of the plotted direction are dark, the other
+    direction light. Only in Hz: in St each run's natural frequency would sit at a different place."""
+    if args.no_modes or args.xaxis == "st":
+        return []
+    own = DIRECTION.get(args.component)
+    lo, hi = (ax.get_ylim() if horizontal else (args.fmin, args.fmax))
+    handles, ticks = [], []
+    for fam, freqs in NATURAL_HZ.items():
+        col, ls = (INK, (0, (5, 3))) if own in (None, fam) else (MUTED, (0, (1.5, 2.5)))
+        tag = fam[0].upper()
+        shown = False
+        for n, fn in enumerate(freqs, 1):
+            if not lo <= fn <= hi:
+                continue
+            shown = True
+            if horizontal:
+                ax.axhline(fn, color=col, ls=ls, lw=0.9, zorder=1)
+                ax.text(1.0, fn, f" {tag}{n}", transform=ax.get_yaxis_transform(), ha="left", va="center",
+                        fontsize=8, color=col)
+            else:
+                ax.axvline(fn, color=col, ls=ls, lw=0.9, zorder=1)
+                ticks.append((fn, f"{tag}{n} {fn:g}", col))
+        if shown:
+            handles.append(Line2D([], [], color=col, ls=ls, lw=1.2, label=f"{fam} natural freq. (ring-down)"))
+    if ticks:
+        ticks.sort()
+        top = ax.secondary_xaxis("top")
+        top.set_xticks([t[0] for t in ticks], [t[1] for t in ticks], rotation=90, fontsize=8)
+        top.xaxis.set_minor_locator(NullLocator())
+        top.tick_params(length=3, color=MUTED)
+        top.spines["top"].set_visible(False)
+        for lab, (_, _, col) in zip(top.get_xticklabels(), ticks):
+            lab.set_color(col)
+    return handles
 
 
 def fmt_x(v, args):
@@ -211,6 +271,8 @@ def set_yaxis(ax, args):
         ax.set_ylim(bottom=0)
     else:
         ax.set_yscale("log")
+    if args.ylim:
+        ax.set_ylim(*args.ylim)
     if args.premult:
         ax.text(0.995, 0.015, "equal area under the curve = equal variance", transform=ax.transAxes, ha="right",
                 va="bottom", fontsize=8, color=MUTED)
@@ -334,10 +396,12 @@ def fig_spectra(run, D, info, args, out):
     set_yaxis(ax, args)
     ax.set_xlim(x[m].min(), x[m].max())
     ax.set_xlabel(xlabel(args), color=INK)
-    ax.set_ylabel(sym_psd(args), color=INK)
+    ax.set_ylabel(direction_prefix(args) + sym_psd(args), color=INK)
     style_axes(ax)
     ax.grid(True, which="minor", color="#efeeea", linewidth=0.5, zorder=0)
-    ax.legend(loc="upper right", frameon=False, fontsize=9, labelcolor=INK)
+    mode_handles = draw_modes(ax, args)
+    ax.legend(handles=ax.get_legend_handles_labels()[0] + mode_handles, loc="upper right", frameon=False,
+              fontsize=9, labelcolor=INK)
     ax.set_title(conditions_line(run, info) + f"   ·   S{args.sensor_id} {band_label(args)}", loc="left",
                  fontsize=11, color=INK)
     save(fig, out, args.dpi)
@@ -449,10 +513,11 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
     ax.set_xscale("log")
     set_yaxis(ax, args)
     ax.set_xlabel(xlabel(args), color=INK)
-    ax.set_ylabel(sym_psd(args), color=INK)
+    ax.set_ylabel(direction_prefix(args) + sym_psd(args), color=INK)
     style_axes(ax)
     ax.grid(True, which="minor", color="#efeeea", linewidth=0.5, zorder=0)
-    lo, hi = min(angs), max(angs)
+    mode_handles = draw_modes(ax, args)
+    lo, hi = round(min(angs), 1), round(max(angs), 1)     # encoder angles carry ~1e-3 deg noise (134.999)
     span = f"{lo:g}°" if np.isclose(lo, hi, atol=0.05) else f"{lo:g}° to {hi:g}°"
     if args.at == "peak":
         inside = f" inside {window[0]:g}–{window[1]:g}°" if window else ""
@@ -464,7 +529,7 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
     if flags:
         nt = sum(f is True for f, _ in used)
         note = f"   ·   region {args.region_name}: {nt} of {len(used)} runs with a peak"
-    ax.set_title(f"S{args.sensor_id} {band_label(args)}   ·   PSD {where}   ·   {len(used)} runs" + note,
+    ax.set_title(f"S{args.sensor_id} {band_label(args)}   ·   PSD {where}\n{len(used)} runs" + note,
                  loc="left", fontsize=11, color=INK)
     handles = []
     if by_flag:
@@ -477,14 +542,19 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
                                   label=f"region not measured ({sum(f is None for f, _ in used)})"))
     elif any(g for _, g in used):
         handles = [Line2D([], [], color=GREY_LINE, lw=2.2, label=f"no peak in region ({sum(g for _, g in used)})")]
+    handles += mode_handles
     if handles:
         ax.legend(handles=handles, loc="best", frameon=False, fontsize=9, labelcolor=INK)
     if show_pk:
         if logc:
             axp.set_xscale("log")
         axp.set_xlabel(clabel, color=INK)
-        axp.set_ylabel("Peak St" if args.xaxis == "st" else "Peak frequency (Hz)", color=INK)
+        axp.set_ylabel(direction_prefix(args) + ("peak St" if args.xaxis == "st" else "peak frequency (Hz)"),
+                       color=INK)
         style_axes(axp)
+        if args.peak_ylim:
+            axp.set_ylim(*args.peak_ylim)
+        draw_modes(axp, args, horizontal=True)
     if cax is not None:
         sm = ScalarMappable(norm=norm, cmap=cmap)
         cb = fig.colorbar(sm, cax=cax)
@@ -529,6 +599,9 @@ def main():
     ap.add_argument("--vmin", type=float)
     ap.add_argument("--vmax", type=float)
     ap.add_argument("--chord", type=float, default=0.0138)
+    ap.add_argument("--no-modes", action="store_true")
+    ap.add_argument("--ylim", type=float, nargs=2, metavar=("LO", "HI"))
+    ap.add_argument("--peak-ylim", type=float, nargs=2, metavar=("LO", "HI"))
     ap.add_argument("--out")
     ap.add_argument("--dpi", type=int, default=200)
     args = ap.parse_args()
