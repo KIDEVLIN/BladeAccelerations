@@ -298,6 +298,147 @@ def figure(stats, groups, example, fs_fig, lag_fig, out_png):
 
 
 # --------------------------------------------------
+# Ring-buffer analysis (--buffer)
+# --------------------------------------------------
+
+BUF_FS_GRID = np.arange(1460.0, 1530.01, 0.5)
+BUF_K_GRID = np.arange(300.0, 1200.0, 2.0)
+TIME_BINS = np.arange(0.0, 10.5, 0.5)
+
+
+def buffer_analysis(files, mode_hz, capacity=1024, fs_nominal=at.DEFAULT_SENSOR_FS_HZ):
+    """Per capture: boundary contiguity over time, split contiguity, and the
+    overwrite-model fit. Uses the channel with the most in-band power."""
+    band_c = (mode_hz[0] / FS_GRID[-1], mode_hz[1] / FS_GRID[0])
+    bnd, split_sum, split_n, prof, pm_prof, fits = [], 0.0, 0, 0.0, 0.0, []
+    W = 0
+    for p in files:
+        df = pd.read_csv(p, comment="#")
+        bt = df["time"].to_numpy(float)
+        reads = at.find_reads(bt)
+        vals = df[ACCEL_COLS].to_numpy(float)
+        Xs = [at._full_blocks(vals[:, j], reads, BLOCK)[0] for j in range(len(ACCEL_COLS))]
+        if Xs[0].shape[0] < 20:
+            continue
+        ch, _, _ = at.dominant_block_mode(Xs, c_min=band_c[0], c_max=band_c[1])
+        bp = at.block_phases(vals[:, ch], bt, band_c, BLOCK)
+        b, t, sc = at.boundary_contiguity(bp, BLOCK)
+        # latest possible overflow onset: buffer empty at t = 0 (START can only make it earlier)
+        occ_min = fs_nominal * reads.t - BLOCK * np.arange(reads.n)
+        on = np.flatnonzero(occ_min >= capacity)
+        t_on_max = float(reads.t[on[0]]) if on.size else np.nan
+        bnd.append(pd.DataFrame(dict(file=p.name, channel=ACCEL_COLS[ch], read=b, t=t, score=sc,
+                                     after_latest_onset=t >= t_on_max)))
+        if bp["keep"].sum() >= 5:
+            ks, sp, nb = at.split_contiguity(bp)
+            split_sum = split_sum + sp * nb
+            split_n += nb
+        fit = at.fit_overwrite_model(bp, BUF_FS_GRID, BUF_K_GRID, BLOCK)
+        if fit["n_pairs"]:
+            prof = prof + fit["profile"] * fit["n_pairs"]
+            pm_prof = pm_prof + fit["postmortem_profile"] * fit["n_pairs"]
+            W += fit["n_pairs"]
+            fits.append(dict(file=p.name, channel=ACCEL_COLS[ch], c=bp["c"], n_pairs=fit["n_pairs"],
+                             fs_hz=fit["fs"], K=fit["K"], coherence=fit["coherence"],
+                             postmortem=fit["postmortem"], no_loss=fit["no_loss"], t_onset_latest=t_on_max))
+    bnd = pd.concat(bnd, ignore_index=True) if bnd else pd.DataFrame()
+    return dict(boundary=bnd, ks=np.arange(12, 73), split=(split_sum / split_n) if split_n else None,
+                split_n=split_n, fits=pd.DataFrame(fits),
+                profile=(prof / W) if W else None, pm_profile=(pm_prof / W) if W else None, n_pairs=W)
+
+
+def buffer_summary(B, mode_hz):
+    L = ["", f"Ring-buffer check (ring-downs, mode {mode_hz[0]:g}-{mode_hz[1]:g} Hz)", "-" * 60]
+    bd = B["boundary"]
+    if not len(bd):
+        return "\n".join(L + ["no usable captures"]), None
+    L.append(f"Read-boundary contiguity (1 = no samples lost between two reads; ~0 or below = lost), "
+             f"{len(bd)} clean read pairs:")
+    for lo, hi in ((0, 2), (2, 3), (3, 4), (4, 5), (5, 7), (7, 99)):
+        m = bd.t.between(lo, hi, inclusive="left")
+        if m.sum():
+            L.append(f"  t = {lo}-{hi if hi < 99 else 'end'} s : median {bd.score[m].median():+.2f}  "
+                     f"(fraction > 0.9: {np.mean(bd.score[m] > 0.9):.2f}, n = {m.sum()})")
+    late = bd.score[bd.after_latest_onset]
+    early = bd.score[bd.t < 2.0]
+    if B["split"] is not None:
+        k = int(B["ks"][np.argmin(B["split"])])
+        L.append(f"In-read contiguity: min {B['split'].min():.2f} at row {k} "
+                 f"(median {np.median(B['split']):.2f}; ~1 everywhere = reads unbroken), {B['split_n']} reads")
+    verdict = None
+    if len(late) >= 20:
+        lost_between = np.median(late) < 0.5
+        split_gap = B["split"] is not None and B["split"].min() < 0.7
+        if lost_between and not split_gap:
+            verdict = "overwrite"
+            L.append("=> After the buffer fills, samples are lost BETWEEN reads and each read is unbroken")
+            L.append("   ('overwrite' policy). Gap-aware timing applies after the overflow onset only.")
+        elif split_gap and not lost_between:
+            verdict = "drop_newest"
+            L.append(f"=> After the buffer fills, each read has a gap INSIDE it (near row {k}) and reads join")
+            L.append("   up end to end ('drop newest' policy). The gap-aware timing in the pipeline does NOT fit.")
+        elif not lost_between and not split_gap:
+            verdict = "no_loss"
+            L.append("=> No sign of lost samples even after the buffer must have filled: check fs / capacity.")
+        else:
+            L.append("=> Mixed signs (gaps both between and inside reads): inconclusive.")
+    else:
+        L.append(f"=> Too few clean read pairs after the latest possible overflow onset ({len(late)}).")
+    if len(early) >= 10:
+        L.append(f"Before 2 s (buffer cannot be full yet): median {np.median(early):+.2f} "
+                 f"-> {'reads join up, no loss' if np.median(early) > 0.8 else 'UNEXPECTED: loss already'}")
+    if B["profile"] is not None:
+        j = int(np.argmax(B["profile"]))
+        L.append(f"Overwrite-model fit over all captures: fs = {BUF_FS_GRID[j]:.1f} Hz, coherence "
+                 f"{B['profile'][j]:.3f}; postmortem model (gaps from t = 0): {B['pm_profile'].max():.3f}")
+        fits = B["fits"][B["fits"].n_pairs >= MIN_PAIRS_CAPTURE]
+        if len(fits) >= 3:
+            L.append(f"  per capture (>= {MIN_PAIRS_CAPTURE} pairs, n = {len(fits)}): fs median {fits.fs_hz.median():.1f} Hz, "
+                     f"IQR {fits.fs_hz.quantile(.25):.1f}-{fits.fs_hz.quantile(.75):.1f}; "
+                     f"K median {fits.K.median():.0f} (~ capacity - fs * START lead)")
+    return "\n".join(L), verdict
+
+
+def buffer_figure(B, mode_hz, out_png):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    plt.rcParams.update({"font.size": 9, "axes.edgecolor": MUTED, "axes.labelcolor": INK,
+                         "xtick.color": MUTED, "ytick.color": MUTED, "axes.spines.top": False,
+                         "axes.spines.right": False, "axes.grid": True, "grid.color": GRID,
+                         "grid.linewidth": 0.6})
+    fig, ax = plt.subplots(1, 3, figsize=(14, 4.2), constrained_layout=True)
+    bd = B["boundary"]
+    a = ax[0]
+    if len(bd):
+        a.scatter(bd.t, bd.score, s=8, color=BLUE, alpha=0.35, lw=0)
+        mid = 0.5 * (TIME_BINS[1:] + TIME_BINS[:-1])
+        med = [bd.score[bd.t.between(lo, hi, inclusive="left")].median() for lo, hi in zip(TIME_BINS[:-1], TIME_BINS[1:])]
+        a.plot(mid, med, color=INK, lw=1.5, label="median per 0.5 s")
+        ton = B["fits"].t_onset_latest.median() if len(B["fits"]) else np.nan
+        if np.isfinite(ton):
+            a.axvline(ton, color=ORANGE, lw=1, ls="--")
+            a.text(ton, -1.08, " buffer full by here\n (even if empty at t = 0)", color=ORANGE, fontsize=8, va="bottom")
+        a.legend(frameon=False, loc="upper right")
+    a.set(xlabel="Time in capture (s)", ylabel="Read-boundary contiguity", ylim=(-1.1, 1.1),
+          title="(a) Do consecutive reads join up? (1 = no loss)")
+    a = ax[1]
+    if B["split"] is not None:
+        a.plot(B["ks"], B["split"], color=BLUE, lw=1.5)
+    a.set(xlabel="Row inside the read where it is split", ylabel="In-read contiguity", ylim=(-1.1, 1.1),
+          title="(b) Is each read unbroken? (dip = gap inside)")
+    a = ax[2]
+    if B["profile"] is not None:
+        a.plot(BUF_FS_GRID, B["profile"], color=BLUE, lw=1.5, label="buffer fills, then overwrites")
+        a.plot(BUF_FS_GRID, B["pm_profile"], color=ORANGE, lw=1.5, label="postmortem: gaps from t = 0")
+        a.legend(frameon=False, loc="lower right")
+    a.set(xlabel="Sensor rate fs (Hz)", ylabel="Read-to-read phase coherence", ylim=(-1.1, 1.1),
+          title=f"(c) Sample rate under each model ({B['n_pairs']} pairs)")
+    fig.suptitle(f"Ring-buffer check, ring-downs, mode {mode_hz[0]:g}-{mode_hz[1]:g} Hz", color=INK)
+    fig.savefig(out_png, dpi=150)
+
+
+# --------------------------------------------------
 # Main
 # --------------------------------------------------
 
@@ -315,6 +456,10 @@ def main():
                          "Default: the strongest line in each capture")
     ap.add_argument("--skip-production", action="store_true", help="read stats only for production captures")
     ap.add_argument("--stats-only", action="store_true", help="skip the fs/lag estimate (fast)")
+    ap.add_argument("--buffer", action="store_true",
+                    help="ring-buffer check on the ring-downs (needs --mode-hz; uses the first band): when do "
+                         "losses start, between or inside reads, and fs under the fill-then-overwrite model")
+    ap.add_argument("--capacity", type=int, default=1024, help="ring buffer size in sample-sets (AF10R1 UG)")
     args = ap.parse_args()
     modes = [tuple(m) for m in args.mode_hz] if args.mode_hz else [None]
 
@@ -383,6 +528,18 @@ def main():
     groups = dict(sorted(groups.items(), key=lambda kv: (kv[0][0] != "ringdown", kv[0][1])))
 
     text, fs_best, lag_best = summarize(stats, est_df if len(est_df) else None, groups, args.fs_nominal)
+    if args.buffer:
+        if not args.mode_hz:
+            sys.exit("--buffer needs --mode-hz LO HI (e.g. 55 70)")
+        ring = [p for p in files if kind_of(p) == "ringdown"]
+        print(f"ring-buffer check on {len(ring)} ring-downs")
+        B = buffer_analysis(ring, tuple(args.mode_hz[0]), args.capacity, args.fs_nominal)
+        btxt, _ = buffer_summary(B, tuple(args.mode_hz[0]))
+        text += "\n" + btxt
+        if len(B["boundary"]):
+            B["boundary"].to_csv(out / "buffer_boundaries.csv", index=False)
+            B["fits"].to_csv(out / "buffer_fits.csv", index=False)
+            buffer_figure(B, tuple(args.mode_hz[0]), out / "buffer_check.png")
     (out / "timing_summary.txt").write_text(text)
     print("\n" + text)
 

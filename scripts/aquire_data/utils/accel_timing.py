@@ -476,3 +476,102 @@ def competing_lobes(fs_grid, curve, fs_min, tol=0.1):
     best = R.max()
     peaks = [i for i in range(1, len(R) - 1) if R[i] >= R[i - 1] and R[i] >= R[i + 1] and R[i] > best - tol]
     return [(float(fs_grid[i]), float(curve[i])) for i in peaks]
+
+
+# --------------------------------------------------
+# Ring-buffer diagnostics (AF10R1 UG: 1024-set ring buffer, OVERRUN = samples
+# lost to buffer overflow; each capture does RESET_BUF + START ~0.1 s before
+# t = 0). If the host reads slower than the sensors fill the buffer, nothing
+# is lost until the buffer is full (~3-4 s); after that it overflows. What the
+# file then holds depends on the firmware:
+#   "overwrite"   oldest sets overwritten -> each read is 84 consecutive sets,
+#                 gaps BETWEEN reads, data ~capacity/fs old
+#   "drop_newest" new sets refused       -> gaps INSIDE reads, at a fixed row
+# The first two tests below use no time stamps and no sample rate: only the
+# mode frequency in cycles/sample, measured inside reads.
+# --------------------------------------------------
+
+def block_phases(x, batch_time, band_c, block_len=84, min_r2=0.5):
+    """Mode fit in every full read. band_c: (lo, hi) cycles/sample.
+    Returns dict(c, A, r2, keep, idx, X, reads)."""
+    x = np.asarray(x, dtype=float)
+    reads = find_reads(batch_time)
+    X, idx = _full_blocks(x, reads, block_len)
+    c, _, _ = in_read_frequency(X, *band_c)
+    A, r2 = _block_fit(X, c)
+    keep = _clean_blocks(A, r2, min_r2)
+    if keep.sum() >= 5:
+        c, _, _ = in_read_frequency(X[keep], *band_c, normalize=True)
+        A, r2 = _block_fit(X, c)
+        keep = _clean_blocks(A, r2, min_r2)
+    return dict(c=c, A=A, r2=r2, keep=keep, idx=idx, X=X, reads=reads)
+
+
+def boundary_contiguity(bp, block_len=84):
+    """For each pair of consecutive clean reads: cos(phase step - 2*pi*c*84).
+    = 1 when the second read starts right where the first ended (no samples
+    lost between them); scattered when samples were lost. Plot against time
+    to see when losses start. Returns (read index of 2nd read, its time stamp, score)."""
+    consec = _pairs(bp["keep"], bp["idx"])
+    A = bp["A"]
+    dphi = np.angle(A[consec + 1] * np.conj(A[consec]))
+    score = np.cos(dphi - 2 * np.pi * bp["c"] * block_len)
+    b = bp["idx"][consec + 1]
+    return b, bp["reads"].t[b], score
+
+
+def split_contiguity(bp, ks=range(12, 73)):
+    """Is each read itself one unbroken run of samples? For every split row k,
+    fit the mode separately to rows [0, k) and [k, 84) of clean reads, on one
+    index axis, and score cos(phase difference). ~1 for every k when reads
+    are unbroken; a dip at the row where a gap sits ("drop_newest").
+    Returns (ks, score per k, n blocks used)."""
+    X = bp["X"][bp["keep"]]
+    c = bp["c"]
+    n = X.shape[1]
+    out = []
+    for k in ks:
+        ph = []
+        for rows in (np.arange(0, k), np.arange(k, n)):
+            B = np.column_stack([np.cos(2 * np.pi * c * rows), np.sin(2 * np.pi * c * rows), np.ones(rows.size)])
+            coef, *_ = np.linalg.lstsq(B, X[:, rows].T, rcond=None)
+            ph.append(coef[0] - 1j * coef[1])
+        out.append(np.mean(np.cos(np.angle(ph[1] * np.conj(ph[0])))) if len(X) else np.nan)
+    return np.asarray(list(ks)), np.asarray(out), int(len(X))
+
+
+def overwrite_starts(reads, fs, K, block_len=84):
+    """First true sample index of each read under the "overwrite" policy:
+    s_b = max(84*b, fs*T_b - K). K lumps buffer capacity, the START time
+    before t = 0 and the read latency (K ~ capacity - fs*t_start_offset).
+    K -> -inf is the postmortem model (gaps from the first read);
+    K -> +inf is no loss at all."""
+    b = np.arange(reads.n)
+    return np.maximum(block_len * b, np.rint(fs * reads.t - K)).astype(np.int64)
+
+
+def fit_overwrite_model(bp, fs_grid, K_grid, block_len=84):
+    """Read-to-read phase coherence of the "overwrite" model over (fs, K):
+    the phase step between consecutive clean reads must equal
+    2*pi*c*(s_b - s_{b-1}). Returns dict with the coherence map (nfs, nK),
+    best fs, K, and the two nested limits for comparison: 'postmortem'
+    (gaps from the first read, best over fs) and 'no_loss'."""
+    reads, A, c = bp["reads"], bp["A"], bp["c"]
+    consec = _pairs(bp["keep"], bp["idx"])
+    b0, b1 = bp["idx"][consec], bp["idx"][consec + 1]
+    dphi = np.angle(A[consec + 1] * np.conj(A[consec]))
+    t0, t1 = reads.t[b0], reads.t[b1]
+    fs_grid = np.asarray(fs_grid, float)
+    K_grid = np.asarray(K_grid, float)
+    M = np.empty((fs_grid.size, K_grid.size))
+    pm = np.empty(fs_grid.size)
+    for i, fs in enumerate(fs_grid):
+        s0 = np.maximum(block_len * b0[None, :], np.rint(fs * t0[None, :] - K_grid[:, None]))
+        s1 = np.maximum(block_len * b1[None, :], np.rint(fs * t1[None, :] - K_grid[:, None]))
+        M[i] = np.cos(dphi[None, :] - 2 * np.pi * c * (s1 - s0)).mean(axis=1) if consec.size else np.nan
+        pm[i] = np.cos(dphi - 2 * np.pi * c * np.rint(fs * (t1 - t0))).mean() if consec.size else np.nan
+    no_loss = float(np.cos(dphi - 2 * np.pi * c * block_len * (b1 - b0)).mean()) if consec.size else np.nan
+    i, j = np.unravel_index(np.nanargmax(M), M.shape) if consec.size else (0, 0)
+    return dict(map=M, fs_grid=fs_grid, K_grid=K_grid, fs=float(fs_grid[i]), K=float(K_grid[j]),
+                coherence=float(M[i, j]), profile=M.max(axis=1), postmortem_profile=pm,
+                postmortem=float(np.nanmax(pm)), no_loss=no_loss, n_pairs=int(consec.size))

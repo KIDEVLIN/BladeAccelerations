@@ -123,3 +123,44 @@ def realistic_flick(f0=62.7, zeta=0.01, t_flick=3.5, amp=2000.0, noise=8.0, rng=
             x += np.where(tau > 0, a * np.exp(-z * 2 * np.pi * f * tau) * np.cos(2 * np.pi * f * tau + ph), 0.0)
         return x + noise * rng.standard_normal(t.size)
     return fn
+
+
+def simulate_buffer(signal_fn, policy="overwrite", fs=1493.0, duration=10.0, block=84, capacity=1024,
+                    t_start_offset=0.12, dt_ms=67.0, jitter_ms=0.8, snapshot_delay=0.015,
+                    stamp_jitter_ms=0.3, rng=0):
+    """The AF10R1 as its user guide describes it: a ring buffer of `capacity`
+    sample-sets, filled at fs from START, emptied 84 sets per read.
+    START happens t_start_offset before the capture's t = 0. Each read takes
+    the oldest 84 sets present `snapshot_delay` before its time stamp.
+      policy "overwrite":   when full, a new set overwrites the oldest
+      policy "drop_newest": when full, new sets are discarded
+    Returns (batch_time column, x rows, true sample index of each row, onset read index)."""
+    rng = np.random.default_rng(rng)
+    T = read_times(int(duration / (dt_ms / 1e3)), dt_ms, jitter_ms, rng=rng)
+    T_meas = T + rng.normal(0, stamp_jitter_ms / 1e3, T.size)
+    produced = np.floor((T - snapshot_delay + t_start_offset) * fs).astype(int)   # sets made by each read
+    rows, onset = [], None
+    if policy == "overwrite":
+        consumed = 0
+        for b, n in enumerate(produced):
+            oldest = max(consumed, n - capacity)
+            if oldest > consumed and onset is None:
+                onset = b
+            rows.append(oldest + np.arange(block))
+            consumed = oldest + block
+    elif policy == "drop_newest":
+        stored = []                                   # true indices currently in the buffer, oldest first
+        nxt = 0
+        for b, n in enumerate(produced):
+            while nxt < n:                            # sets produced since the last read
+                if len(stored) < capacity:
+                    stored.append(nxt)
+                elif onset is None:
+                    onset = b
+                nxt += 1
+            rows.append(np.array(stored[:block]))
+            del stored[:block]
+    else:
+        raise ValueError(policy)
+    idx = np.concatenate(rows)
+    return np.repeat(T_meas, block), signal_fn(idx / fs), idx, onset

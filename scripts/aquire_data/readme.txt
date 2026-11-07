@@ -110,6 +110,18 @@ python check_accel_timing.py "D:/GE_blade/<ring-down folder>" --mode-hz 55 70 --
    vibration is too broadband for this check (coherence ~0.1) and is used for the
    read statistics only. Each group gets a verdict: GAPS, EVEN or INCONCLUSIVE.
 
+   Ring-buffer check (AF10R1 UG: 1024-set ring buffer, OVERRUN = samples lost to
+   overflow). Each capture starts with an empty buffer, so nothing is lost for the
+   first ~3-4 s; then it overflows. Find out what the firmware does when full:
+
+```
+python check_accel_timing.py "D:/GE_blade/<ring-down folder>" --mode-hz 55 70 --buffer --out timing_check_buffer
+```
+
+   buffer_check.png: (a) do consecutive reads join up, against time in the capture;
+   (b) is each read unbroken; (c) fs under "fill then overwrite" vs the postmortem
+   model. Panels (a) and (b) use no time stamps and no assumed sample rate.
+
    Reads `timing_summary.txt` / `timing_check.png`: are reads full, what is the
    sensor rate fs (measured from the ring-downs, no vendor value used), and which
    read time anchors each block (lag, measured from the production captures).

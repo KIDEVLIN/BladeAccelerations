@@ -153,3 +153,32 @@ def test_realistic_flick_is_not_fooled_by_the_impact():
     fs, lag, coh, _ = at.combine_estimates(ests)
     assert fs == pytest.approx(FS, abs=4) and lag == 1
     assert coh - np.mean([e.coherence_at_delivered for e in ests]) > 0.5
+
+
+@pytest.mark.parametrize("policy", ["overwrite", "drop_newest"])
+def test_ring_buffer_policy_is_identified(policy):
+    """AF10R1 ring buffer (UG): no loss until full, then either overwrite-oldest
+    (gaps between reads) or drop-newest (gap inside each read)."""
+    late, split_min = [], []
+    for k in range(6):
+        bt, x, idx, onset = sim.simulate_buffer(sim.realistic_flick(t_flick=1.5 + 0.6 * k, rng=k), policy, rng=k)
+        bp = at.block_phases(x, bt, (55 / 1700, 70 / 1150))
+        b, t, sc = at.boundary_contiguity(bp)
+        late += list(sc[b > onset])
+        if b.size and (b < onset).any():
+            assert np.median(sc[b < onset]) > 0.9          # before the buffer fills nothing is lost
+        split_min.append(at.split_contiguity(bp)[1].min())
+    if policy == "overwrite":
+        assert np.median(late) < 0.0 and min(split_min) > 0.85
+    else:
+        assert np.median(late) > 0.8 and min(split_min) < 0.7
+
+
+def test_overwrite_model_recovers_fs_and_onset():
+    bt, x, idx, onset = sim.simulate_buffer(sim.realistic_flick(t_flick=2.5, zeta=0.005, rng=4), "overwrite", rng=4)
+    bp = at.block_phases(x, bt, (55 / 1700, 70 / 1150))
+    fit = at.fit_overwrite_model(bp, np.arange(1470, 1520.1, 0.5), np.arange(300, 1200, 2.0))
+    assert fit["fs"] == pytest.approx(FS, abs=4)
+    assert fit["coherence"] > fit["postmortem"] and fit["coherence"] > fit["no_loss"] + 0.2
+    starts = at.overwrite_starts(at.find_reads(bt), fit["fs"], fit["K"])
+    assert np.abs(starts - idx[::84])[:onset].max() <= 1          # reads before the onset placed exactly
