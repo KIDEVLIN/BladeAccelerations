@@ -90,3 +90,33 @@ including: a run with no `coordinate_frame_angles.csv`, an angle missing its
 load-cell file, an encoder log without the new header (old-style, falls back
 correctly with a warning), and one with it (windowed averaging works: recovered
 10.00° ± 0.003° against a synthetic ground truth of 10.00°).
+# Accelerometer timing (Nov 2026 fix)
+
+The October 2026 captures lost ~19% of accelerometer samples, in a regular
+pattern: each read holds 84 consecutive samples at the sensor rate (~1493 Hz,
+not the 1600 Hz ODR setting), then ~19 are missing before the next read. The
+old even-spacing reconstruction put every frequency ~19% low. Variances,
+clipping and the load cell are not affected. See `utils/accel_timing.py`.
+
+1. Check the timing on the raw data (read-only):
+
+```
+python check_accel_timing.py "D:/GE_blade/Production_10-8-26" "D:/GE_blade/<ring-down folder>" --out timing_check
+```
+
+   Reads `timing_summary.txt` / `timing_check.png`: are reads full, what is the
+   sensor rate fs (measured from the ring-downs, no vendor value used), and which
+   read time anchors each block (lag, measured from the production captures).
+
+2. Put the measured values in `utils/accel_timing.py` (`SENSOR_FS_HZ`, `BLOCK_LAG`)
+   or pass them each time (`--accel-fs`, `--accel-lag`).
+
+3. Re-extract the summaries (spectra change, variances do not):
+
+```
+python extract_run_summary.py --root "D:/GE_blade/Production_10-8-26" --out Production_summaries --force
+```
+
+   `--accel-timing even` reproduces the old (wrong) spectra for comparison.
+
+Tests (simulated captures): `python -m pytest tests -q`

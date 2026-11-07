@@ -29,6 +29,11 @@ import matplotlib.pyplot as plt
 
 from variance_analysis import ACCEL_COLS, LOAD_FORCE_COLS, NUM_SENSORS, accel_mg_per_lsb
 
+try:
+    from .accel_timing import with_gap_breaks
+except ImportError:
+    from accel_timing import with_gap_breaks
+
 LOAD_MOMENT_COLS = ["Mx", "My", "Mz"]
 MG_PER_G = 1000.0
 
@@ -89,8 +94,13 @@ def plot_angle_timeseries(capture, out_path, case_label="High", plot_window_s=0.
     mags_fluct = mags - mags.mean(axis=0, keepdims=True)
     t_accel = capture.accel_df["time"].to_numpy(dtype=float)
     mask_a = t_accel <= plot_window_s
+    t_plot, y_plot = t_accel[mask_a], mags_fluct[mask_a]
+    timing = capture.accel_df.attrs.get("timing", {})
+    if timing.get("method") == "gap_aware":
+        # no lines across the gaps between reads (samples there were never recorded)
+        t_plot, y_plot = with_gap_breaks(t_plot, y_plot, timing["fs_hz"])
     for s in range(NUM_SENSORS):
-        ax_accel.plot(t_accel[mask_a], mags_fluct[mask_a, s], label=f"S{s + 1}", linewidth=1.0)
+        ax_accel.plot(t_plot, y_plot[:, s], label=f"S{s + 1}", linewidth=1.0)
     ax_accel.set_ylabel("Acceleration fluctuation (g)")
     ax_accel.set_xlim(0, plot_window_s)
     ax_accel.axhline(0, color="k", linewidth=0.5, alpha=0.4)

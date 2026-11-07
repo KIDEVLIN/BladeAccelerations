@@ -43,10 +43,21 @@ The accel CSV's "time" column is stamped once per FIFO batch read
 (t_batch = perf_counter() - t_start at the moment Python finished
 reading that batch off the PCB) and then written on EVERY row in that
 batch -- so many rows share one timestamp, in the order they came off
-the sensor. load_accel_csv() reconstructs a real per-row time by
-assuming, within each batch, samples are evenly spaced between the
-previous batch's timestamp and this batch's timestamp (the first
-batch is spaced from 0). See _reconstruct_batch_times() below.
+the sensor.
+
+CHANGED Nov 2026 (accel postmortem): samples are LOST between reads.
+The rows of one read are consecutive sensor samples at the real sensor
+rate (~1493 Hz), and ~19 samples per read are missing between reads.
+load_accel_csv() therefore now uses the gap-aware time base by default
+(utils/accel_timing.py): each read's rows sit 1/fs apart, the last one at
+the read's time stamp, with gaps between reads. The returned frame has
+    time        gap-aware per-row time (s)
+    batch_time  the raw CSV time stamp of the row's read
+    slot        integer position on the 1/fs grid (for gap-aware spectra:
+                accel_timing.masked_welch(x, df["slot"], fs))
+timing="even" gives the OLD reconstruction (rows evenly spread between
+read times), which shifts every frequency ~19% low: use it only to
+compare with old results. Variances do not depend on the timing.
 """
 
 import re
@@ -58,6 +69,11 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+try:
+    from . import accel_timing as _at
+except ImportError:          # utils/ on sys.path directly
+    import accel_timing as _at
+
 # Reuse constants from the acquisition pipeline instead of duplicating them.
 _ACQUIRE_DIR = Path(__file__).resolve().parents[1] / "aquire_data"
 if str(_ACQUIRE_DIR) not in sys.path:
@@ -65,6 +81,7 @@ if str(_ACQUIRE_DIR) not in sys.path:
 
 _T_START_RE = re.compile(r"t_start_perf_counter=([0-9.eE+\-]+)")
 _MG_PER_LSB_RE = re.compile(r"([0-9.]+)\s*mg/LSB")
+_ODR_RE = re.compile(r"ODR=(\d+)\s*Hz")
 _ENCODER_ABS_RE = re.compile(r"start_time_perf_counter=([0-9.eE+\-]+)")
 _ANGLE_FILENAME_RE = re.compile(r"angle_([+\-]?\d+\.\d+)deg\.csv$")
 
@@ -122,17 +139,38 @@ def _reconstruct_batch_times(df, time_col="time"):
     return df
 
 
-def load_accel_csv(path):
+def load_accel_csv(path, timing="gap_aware", fs=None, lag=None):
     """Returns (DataFrame, t_start_perf_counter_or_None). The "time"
-    column is reconstructed to one timestamp per row -- see
-    _reconstruct_batch_times() / the module docstring.
+    column is reconstructed to one timestamp per row -- see the module
+    docstring. timing: "gap_aware" (default) or "even" (old, wrong for
+    spectra). fs / lag default to accel_timing.SENSOR_FS_HZ / BLOCK_LAG.
+    The timing used is in df.attrs["timing"].
 
     The accelerometer sensitivity from the CSV header is stored in
     df.attrs["mg_per_lsb"] (absent if the header has none); use
     variance_analysis.accel_mg_per_lsb(df) to read it with the 2g fallback."""
     t_start = _read_header_t_start(path)
     df = pd.read_csv(path, comment="#")
-    df = _reconstruct_batch_times(df)
+    df["batch_time"] = df["time"]
+    if timing == "even":
+        df = _reconstruct_batch_times(df)
+        df.attrs["timing"] = dict(method="even")
+    elif timing == "gap_aware":
+        if fs is None:
+            fs = _at.SENSOR_FS_HZ
+            with open(path) as fh:
+                m = _ODR_RE.search(fh.readline())
+            if m and int(m.group(1)) != 1600:
+                # SENSOR_FS_HZ was measured at ODR=1600; assume the oscillator error scales
+                # (unverified: measure other ODRs with check_accel_timing.py)
+                fs = _at.SENSOR_FS_HZ * int(m.group(1)) / 1600.0
+        lag = _at.BLOCK_LAG if lag is None else lag
+        t, slots, info = _at.gap_aware_times(df["batch_time"].to_numpy(dtype=float), fs, lag)
+        df["time"] = t
+        df["slot"] = slots
+        df.attrs["timing"] = dict(method="gap_aware", **info)
+    else:
+        raise ValueError(f"timing must be 'gap_aware' or 'even', not {timing!r}")
     mg_per_lsb = _read_header_mg_per_lsb(path)
     if mg_per_lsb is not None:
         df.attrs["mg_per_lsb"] = mg_per_lsb

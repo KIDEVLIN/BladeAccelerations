@@ -68,8 +68,10 @@ from utils.run_loader import (  # noqa: E402
     load_encoder_log, windowed_average_angle,
 )
 from utils import coordinate_transforms as ct  # noqa: E402
+from utils import accel_timing as at  # noqa: E402
 
-EXTRACTOR_VERSION = "1.2"   # 1.1: per-axis nvar_s{k}_{x,y,z}; 1.2: per-axis PSDs (accel + load cell) and load-cell CSDs
+EXTRACTOR_VERSION = "1.3-gap"   # 1.1: per-axis nvar_s{k}_{x,y,z}; 1.2: per-axis PSDs (accel + load cell) and load-cell CSDs;
+                                # 1.3-gap: accel spectra on the gap-aware time base (Nov 2026 timing fix), read/loss stats
 
 G = 9.80665
 NUM_SENSORS = 4
@@ -166,7 +168,8 @@ def spectrum_peak(f, p, min_hz):
 
 
 def analyze_angle(i, angle_val, accel_path, load_path, info, meta_rows, enc, args):
-    accel_df, t_acc0 = load_accel_csv(accel_path)
+    accel_df, t_acc0 = load_accel_csv(accel_path, timing=args.accel_timing, fs=args.accel_fs, lag=args.accel_lag)
+    timing = accel_df.attrs["timing"]
     mg = accel_df.attrs.get("mg_per_lsb") or info["accel_mg_per_lsb"] or 0.061
     raw = accel_df[ACCEL_COLS].to_numpy(dtype=float)
     t = accel_df["time"].to_numpy(dtype=float)
@@ -175,6 +178,23 @@ def analyze_angle(i, angle_val, accel_path, load_path, info, meta_rows, enc, arg
     fs_acc = n / duration if duration > 0 else np.nan
     row = dict(index=i, requested_angle_deg=angle_val, accel_file=accel_path.name,
                accel_n=n, accel_rate_hz=fs_acc, accel_mg_per_lsb=mg)
+    # read / loss statistics (see utils/accel_timing.py)
+    rs = at.read_stats(at.find_reads(accel_df["batch_time"].to_numpy(dtype=float)),
+                       timing.get("fs_hz", at.SENSOR_FS_HZ))
+    row.update(accel_timing=timing["method"], accel_sensor_fs_hz=timing.get("fs_hz", np.nan),
+               accel_block_lag=timing.get("lag", np.nan),
+               accel_reads_full_frac=rs.get("frac_reads_full", np.nan),
+               accel_read_rate_hz=rs.get("read_rate_hz", np.nan),
+               accel_lost_frac=rs.get("lost_frac_at_fs", np.nan))
+    # spectra: gap-aware grid (slot) at the sensor rate, or the old even spacing at the delivered rate
+    gap_aware = timing["method"] == "gap_aware"
+    fs_spec = timing["fs_hz"] if gap_aware else fs_acc
+
+    def accel_psd(x, sel):
+        if gap_aware:
+            f_, p_, _ = at.masked_welch(x, accel_df["slot"].to_numpy()[sel], fs_spec, nperseg=nper)
+            return f_, p_
+        return welch(x - x.mean(), fs=fs_spec, nperseg=nper)
     notes = []
 
     # ---- clipping (full capture, before any trimming) ----
@@ -212,13 +232,13 @@ def analyze_angle(i, angle_val, accel_path, load_path, info, meta_rows, enc, arg
             vj = float(np.var(acc_g[keep, s, j])) if len(x) else np.nan
             row[f"var_g2_s{s + 1}_{ax_name}"] = vj
             row[f"nvar_s{s + 1}_{ax_name}"] = vj / a_c ** 2 if math.isfinite(a_c) and a_c > 0 else np.nan
-        if len(x) >= 16 and math.isfinite(fs_acc):
-            f, p = welch(x - x.mean(), fs=fs_acc, nperseg=nper)
+        if len(x) >= 16 and math.isfinite(fs_spec):
+            f, p = accel_psd(x, keep)
             pk_f, pk_p = spectrum_peak(f, p, args.min_peak_hz)
             psd_acc.append(p)
             for j, ax_name in enumerate("xyz"):
                 xa = acc_g[keep, s, j]
-                _, pa = welch(xa - xa.mean(), fs=fs_acc, nperseg=nper)
+                _, pa = accel_psd(xa, keep)
                 psd_axes[s, j] = pa
                 row[f"peak_hz_s{s + 1}_{ax_name}"], row[f"peak_psd_s{s + 1}_{ax_name}"] = \
                     spectrum_peak(f, pa, args.min_peak_hz)
@@ -308,16 +328,26 @@ def analyze_angle(i, angle_val, accel_path, load_path, info, meta_rows, enc, arg
 # One run
 # --------------------------------------------------
 
+def timing_settings(args):
+    """Accel time base used for the spectra (a change forces reprocessing)."""
+    if args.accel_timing == "even":
+        return dict(method="even")
+    fs = float(args.accel_fs) if args.accel_fs else f"default {at.SENSOR_FS_HZ:g} (ODR-scaled)"
+    return dict(method="gap_aware", fs_hz=fs, lag=int(args.accel_lag))
+
+
 def process_run(run_dir, out_root, args, consts):
     out_dir = out_root / run_dir.name
     info_path = out_dir / "run_info.json"
     if info_path.exists() and not args.force:
         old = json.loads(info_path.read_text())
-        if old.get("extractor_version") == EXTRACTOR_VERSION and old.get("complete"):
+        if (old.get("extractor_version") == EXTRACTOR_VERSION and old.get("complete")
+                and old.get("accel_timing") == timing_settings(args)):
             print(f"[{run_dir.name}] up to date, skipping")
             return
     print(f"\n[{run_dir.name}]")
     info, meta = build_run_info(run_dir, consts)
+    info["accel_timing"] = timing_settings(args)
     pairs = _discover_angle_files(run_dir)
     if not pairs:
         print("  no angle_*.csv files, skipping")
@@ -407,6 +437,13 @@ def main():
     ap.add_argument("--trim-s", type=float, default=0.0,
                     help="ignore the first N seconds of each capture for variance/spectra")
     ap.add_argument("--nperseg", type=int, default=2048, help="Welch segment length")
+    ap.add_argument("--accel-timing", choices=["gap_aware", "even"], default="gap_aware",
+                    help="accel time base for spectra; 'even' = old (pre Nov 2026), frequencies ~19%% low")
+    ap.add_argument("--accel-fs", type=float, default=None,
+                    help="true accelerometer sample rate (Hz); default accel_timing.SENSOR_FS_HZ "
+                         "(scaled for ODR != 1600); measure with check_accel_timing.py")
+    ap.add_argument("--accel-lag", type=int, default=at.BLOCK_LAG,
+                    help="read whose time stamp anchors each block (check_accel_timing.py); 0 = own stamp")
     ap.add_argument("--min-peak-hz", type=float, default=5.0,
                     help="lowest frequency considered when picking a spectral peak")
     ap.add_argument("--no-csd", action="store_true",
