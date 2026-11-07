@@ -139,3 +139,17 @@ def test_wrong_lag_smears_high_frequency_peaks_in_production():
         f, p, _ = at.masked_welch(x, slots, FS, nperseg=4096)
         heights[lag] = p.max()
     assert heights[1] > 3 * heights[0]
+
+
+def test_realistic_flick_is_not_fooled_by_the_impact():
+    """A recorded flick starts with a large multi-mode impact. Only reads the
+    flap mode dominates may be used, otherwise fs comes out wrong (the
+    failure seen on the Oct 2026 ring-downs with the first version)."""
+    ests = []
+    for k in range(5):
+        bt, x, _ = sim.simulate(sim.realistic_flick(rng=k), "oldest", fs=FS, rng=k, **RINGDOWN)
+        ests.append(at.estimate_timing(x, bt, (55, 70)))
+    assert all(e.n_pairs >= 10 for e in ests)
+    fs, lag, coh, _ = at.combine_estimates(ests)
+    assert fs == pytest.approx(FS, abs=4) and lag == 1
+    assert coh - np.mean([e.coherence_at_delivered for e in ests]) > 0.5

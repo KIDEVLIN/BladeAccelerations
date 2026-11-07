@@ -280,7 +280,7 @@ class TimingEstimate:
     n_pairs: int = 0                  # consecutive read pairs used
     fs_grid: np.ndarray = None
     curves: dict = None               # lag -> coherence over fs_grid (sum these across captures)
-    weight: float = 0.0               # sum of pair weights (for combining captures)
+    weight: float = 0.0               # = n_pairs (for combining captures)
     delivered_rate_hz: float = np.nan # rows per second in the file
     coherence_at_delivered: float = np.nan  # best-lag coherence if fs were the delivered rate (old even-spacing view)
 
@@ -296,21 +296,41 @@ def _full_blocks(x, reads, block_len):
 
 def _block_fit(X, c):
     """Least-squares a*cos + b*sin (+ mean) at c cycles/sample in each row of X.
-    Returns complex amplitude per block (phase at the block's first sample)."""
+    Returns (complex amplitude per block, phase at the block's first sample;
+    r2 = fraction of the block's variance the sinusoid explains)."""
     n = X.shape[1]
     k = np.arange(n)
     B = np.column_stack([np.cos(2 * np.pi * c * k), np.sin(2 * np.pi * c * k), np.ones(n)])
     coef, *_ = np.linalg.lstsq(B, X.T, rcond=None)
-    return coef[0] - 1j * coef[1]          # A cos(wk + phi) = Re(A e^{i phi} e^{iwk})
+    resid = X.T - B @ coef
+    tot = ((X - X.mean(axis=1, keepdims=True)) ** 2).sum(axis=1)
+    r2 = 1.0 - (resid ** 2).sum(axis=0) / np.where(tot > 0, tot, np.inf)
+    return coef[0] - 1j * coef[1], r2       # A cos(wk + phi) = Re(A e^{i phi} e^{iwk})
 
 
-def in_read_frequency(X, c_lo, c_hi, n_grid=2000):
+def _clean_blocks(A, r2, min_r2=0.5, noise_k=0.0):
+    """Blocks where the mode clearly stands out: the sinusoid explains at
+    least min_r2 of the block's variance. This rejects noise-only reads
+    (r2 ~ 0.02 for 84 samples) and the reads right after a flick, where many
+    modes ring at once. noise_k > 0 additionally requires the amplitude to
+    exceed noise_k times the median block amplitude (off by default: it
+    fails for steady vibrations, where every read has the mode)."""
+    keep = r2 >= min_r2
+    if noise_k > 0:
+        keep &= np.abs(A) > noise_k * np.median(np.abs(A))
+    return keep
+
+
+def in_read_frequency(X, c_lo, c_hi, n_grid=2000, normalize=False):
     """Mode frequency in cycles/sample from the power of a block-wise sinusoid
-    fit, summed over blocks (refined with a parabola). Uses no time stamps."""
+    fit, summed over blocks (refined with a parabola). Uses no time stamps.
+    normalize: give every block equal weight (so a few huge blocks cannot dominate)."""
     cs = np.linspace(c_lo, c_hi, n_grid)
     n = X.shape[1]
     k = np.arange(n)
     Xc = X - X.mean(axis=1, keepdims=True)
+    if normalize:
+        Xc = Xc / np.sqrt((Xc ** 2).sum(axis=1, keepdims=True) + 1e-30)
     E = np.exp(-2j * np.pi * np.outer(k, cs))              # (n, ng)
     P = (np.abs(Xc @ E) ** 2).sum(axis=0)
     j = int(np.argmax(P))
@@ -339,35 +359,31 @@ def dominant_block_mode(Xs, c_min=0.02, c_max=0.45, n_grid=1500):
     return best
 
 
-def _pairs(A, idx, amp_frac):
-    """Consecutive full reads with enough mode amplitude in both."""
+def _pairs(keep, idx):
+    """Indices (into the block list) of consecutive reads that are both clean."""
     consec = np.flatnonzero(np.diff(idx) == 1)
-    a0, a1 = A[consec], A[consec + 1]
-    thr = amp_frac * np.abs(A).max()
-    keep = (np.abs(a0) > thr) & (np.abs(a1) > thr)
-    return consec[keep], a0[keep], a1[keep]
+    return consec[keep[consec] & keep[consec + 1]]
 
 
-def _signed_coherence(A, idx, reads, f, lag, amp_frac):
-    """Weighted mean of cos(dphi_measured - 2*pi*f*dT) over consecutive reads,
-    for each frequency f (array). dT = time between the two blocks under the
-    given lag. Signed: unlike |mean exp(i...)|, a constant phase error counts
-    against the model, which is what makes it sensitive to f when read
-    intervals barely vary."""
+def _signed_coherence(A, keep, idx, reads, f, lag):
+    """Mean of cos(dphi_measured - 2*pi*f*dT) over consecutive clean reads,
+    for each frequency f (array); every pair counts equally. dT = time
+    between the two blocks under the given lag. Signed: unlike
+    |mean exp(i...)|, a constant phase error counts against the model, which
+    is what makes it sensitive to f when read intervals barely vary."""
     anchor = _anchor_times(reads, lag)
     start_t = anchor[idx]                                   # block start up to a constant (blocks all one length)
-    consec, a0, a1 = _pairs(A, idx, amp_frac)
+    consec = _pairs(keep, idx)
     if consec.size == 0:
-        return np.zeros_like(f), 0, 0.0
-    w = np.abs(a0) * np.abs(a1)
-    dphi = np.angle(a1 * np.conj(a0))
+        return np.zeros_like(f), 0
+    dphi = np.angle(A[consec + 1] * np.conj(A[consec]))
     dT = start_t[consec + 1] - start_t[consec]
-    R = (np.cos(dphi[None, :] - 2 * np.pi * f[:, None] * dT[None, :]) * w).sum(axis=1) / w.sum()
-    return R, int(consec.size), float(w.sum())
+    R = np.cos(dphi[None, :] - 2 * np.pi * f[:, None] * dT[None, :]).mean(axis=1)
+    return R, int(consec.size)
 
 
 def estimate_timing(x, batch_time, band_hz, fs_grid=None, lags=range(0, 16), block_len=84,
-                    amp_frac=0.2):
+                    min_r2=0.5, noise_k=0.0):
     """Estimate the sensor rate and how blocks are anchored, from one capture
     whose signal x is dominated by one mode whose TRUE frequency lies in
     band_hz.
@@ -381,7 +397,11 @@ def estimate_timing(x, batch_time, band_hz, fs_grid=None, lags=range(0, 16), blo
     right one. Candidate fs values repeat every read_rate/c Hz (alias
     lobes); runner_up_* says how clearly the best lobe wins. Low-frequency
     modes (ring-downs) give widely spaced lobes, hence an unambiguous fs.
-    Lag is only identifiable when read intervals vary (production captures)."""
+    Lag is only identifiable when read intervals vary.
+
+    Only "clean" reads are used (see _clean_blocks): the mode well above
+    the noise and explaining most of the read. n_pairs says how many
+    consecutive clean reads the result rests on; below ~50 it is weak."""
     x = np.asarray(x, dtype=float)
     reads = find_reads(batch_time)
     X, idx = _full_blocks(x, reads, block_len)
@@ -391,8 +411,14 @@ def estimate_timing(x, batch_time, band_hz, fs_grid=None, lags=range(0, 16), blo
         fs_grid = np.arange(1150.0, 1700.0, 0.25)
     fs_grid = np.asarray(fs_grid, dtype=float)
 
-    c, _, _ = in_read_frequency(X, band_hz[0] / fs_grid[-1], band_hz[1] / fs_grid[0])
-    A = _block_fit(X, c)
+    c_lo, c_hi = band_hz[0] / fs_grid[-1], band_hz[1] / fs_grid[0]
+    c, _, _ = in_read_frequency(X, c_lo, c_hi)
+    A, r2 = _block_fit(X, c)
+    keep = _clean_blocks(A, r2, min_r2, noise_k)
+    if keep.sum() >= 5:                                     # refine c on the clean reads only, equal weight
+        c, _, _ = in_read_frequency(X[keep], c_lo, c_hi, normalize=True)
+        A, r2 = _block_fit(X, c)
+        keep = _clean_blocks(A, r2, min_r2, noise_k)
 
     # the sensors cannot produce fewer samples than the file holds: fs >= delivered rate
     delivered = reads.length[1:].sum() / (reads.t[-1] - reads.t[0])
@@ -401,9 +427,8 @@ def estimate_timing(x, batch_time, band_hz, fs_grid=None, lags=range(0, 16), blo
     curves, by_lag = {}, {}
     best = None
     n_pairs = 0
-    wsum = 0.0
     for lag in lags:
-        R, n_pairs, wsum = _signed_coherence(A, idx, reads, c * fs_grid, lag, amp_frac)
+        R, n_pairs = _signed_coherence(A, keep, idx, reads, c * fs_grid, lag)
         curves[int(lag)] = R
         Ra = np.where(allowed, R, -np.inf)
         j = int(np.argmax(Ra))
@@ -418,12 +443,12 @@ def estimate_timing(x, batch_time, band_hz, fs_grid=None, lags=range(0, 16), blo
     R = curves[lag]
     ru = (float(fs_grid[far][np.argmax(R[far])]), float(R[far].max())) if far.any() else (np.nan, np.nan)
 
-    coh_del = max(float(_signed_coherence(A, idx, reads, np.array([c * delivered]), lg, amp_frac)[0][0])
+    coh_del = max(float(_signed_coherence(A, keep, idx, reads, np.array([c * delivered]), lg)[0][0])
                   for lg in lags)
 
     return TimingEstimate(c_cycles_per_sample=c, fs_hz=fs_best, f0_hz=c * fs_best, lag=lag, coherence=coh,
                           coherence_by_lag=by_lag, runner_up_fs_hz=ru[0], runner_up_coherence=ru[1],
-                          n_pairs=n_pairs, fs_grid=fs_grid, curves=curves, weight=wsum,
+                          n_pairs=n_pairs, fs_grid=fs_grid, curves=curves, weight=float(n_pairs),
                           delivered_rate_hz=float(delivered), coherence_at_delivered=coh_del)
 
 

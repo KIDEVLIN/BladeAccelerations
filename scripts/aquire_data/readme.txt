@@ -102,7 +102,13 @@ clipping and the load cell are not affected. See `utils/accel_timing.py`.
 
 ```
 python check_accel_timing.py "D:/GE_blade/Production_10-8-26" "D:/GE_blade/<ring-down folder>" --out timing_check
+python check_accel_timing.py "D:/GE_blade/<ring-down folder>" --mode-hz 55 70 --out timing_check_flap
 ```
+
+   The second run uses only the first flap mode (video: 62.7 Hz). Automatic mode
+   choice tends to lock onto the short multi-mode impact of a flick; production
+   vibration is too broadband for this check (coherence ~0.1) and is used for the
+   read statistics only. Each group gets a verdict: GAPS, EVEN or INCONCLUSIVE.
 
    Reads `timing_summary.txt` / `timing_check.png`: are reads full, what is the
    sensor rate fs (measured from the ring-downs, no vendor value used), and which

@@ -105,3 +105,21 @@ def write_capture_csv(path, signals, model="newest", fs=1493.0, duration=20.0, r
         for i in range(t_true.size):
             w.writerow([i, f"{bt[i]:.4f}"] + [data[c][i] for c in cols])
     return t_true
+
+
+def realistic_flick(f0=62.7, zeta=0.01, t_flick=3.5, amp=2000.0, noise=8.0, rng=1,
+                    transient=((290.0, 0.03, 12000.0), (160.0, 0.02, 4000.0), (650.0, 0.05, 15000.0))):
+    """Ring-down as recorded: a large, fast-decaying multi-mode impact (f, zeta, amp)
+    on top of the ringing first flap mode. The impact makes the first reads after the
+    flick far larger than the flap mode ever is."""
+    rng = np.random.default_rng(rng)
+    modes = ((f0, zeta, amp),) + tuple(transient)
+    phases = rng.uniform(0, 2 * np.pi, len(modes))
+
+    def fn(t):
+        tau = np.clip(t - t_flick, -1.0, None)
+        x = np.zeros(t.size)
+        for (f, z, a), ph in zip(modes, phases):
+            x += np.where(tau > 0, a * np.exp(-z * 2 * np.pi * f * tau) * np.cos(2 * np.pi * f * tau + ph), 0.0)
+        return x + noise * rng.standard_normal(t.size)
+    return fn
