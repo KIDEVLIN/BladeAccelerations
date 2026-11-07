@@ -502,12 +502,14 @@ def competing_lobes(fs_grid, curve, fs_min, tol=0.1):
 # mode frequency in cycles/sample, measured inside reads.
 # --------------------------------------------------
 
-def latest_overflow_onset(reads, fs=DEFAULT_SENSOR_FS_HZ, capacity=1024, block_len=84):
+def latest_overflow_onset(reads, fs=DEFAULT_SENSOR_FS_HZ, capacity=1024, block_len=84, stamp_delay_s=0.05):
     """Latest read by which the ring buffer must have overflowed, assuming it
-    was empty at t = 0 (START before t = 0 only makes overflow earlier).
-    Returns (read index, its time stamp); (n_reads, inf) if it never must.
-    From this read on, the gap-aware (between-read gap) time base holds."""
-    occ_min = fs * reads.t - block_len * np.arange(reads.n)
+    was empty at t = 0 (START before t = 0 only makes overflow earlier) and
+    that the board takes each read up to stamp_delay_s before Python stamps it
+    (transfer + USB latency). Returns (read index, its time stamp);
+    (n_reads, inf) if it never must. From this read on, the gap-aware
+    (between-read gap) time base holds."""
+    occ_min = fs * (reads.t - stamp_delay_s) - block_len * np.arange(reads.n)
     on = np.flatnonzero(occ_min >= capacity)
     return (int(on[0]), float(reads.t[on[0]])) if on.size else (int(reads.n), float("inf"))
 
