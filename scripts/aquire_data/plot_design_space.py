@@ -54,6 +54,11 @@ Options
     --angles PATH       master_angles.csv (default: next to master_runs.csv)
     --metrics PATH      master_metrics.csv (default: next to master_runs.csv; master_metrics_S4.csv with --sensor S4)
     --no-labels         hide the dataset names (e.g. 390/300)
+    --transparent / --no-transparent   PNG background: transparent (default) or the off-white of earlier versions.
+                           The text and lines are dark, so a transparent PNG belongs on a light slide background
+    --box / --no-box       frame all four sides of the plot (default: box)
+    --fontsize N           base font size in points (default 10). Axis labels and ticks use it; titles, legends and
+                           annotations scale in proportion, so 14 makes everything 1.4x larger
     --out DIR, --dpi N
 
 Outputs (in --out, default <master_runs folder>/figures):
@@ -73,6 +78,7 @@ Requires: numpy pandas matplotlib
 """
 
 import argparse
+import sys
 import re
 from pathlib import Path
 
@@ -84,6 +90,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt                                  # noqa: E402
 from matplotlib.colors import LogNorm, Normalize                 # noqa: E402
 from matplotlib.lines import Line2D                              # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from plot_angle_sweep import add_style_args, apply_style, frame, fs   # noqa: E402
 
 INK = "#1a1a19"
 MUTED = "#6b6b66"
@@ -183,7 +192,7 @@ def pick_regions(df, wanted, mpath):
     for w in wanted:
         name = w if w.startswith("r") else f"r{w}"
         if name not in have:
-            raise SystemExit(f"--flag {w!r}: no such region; {mpath} has {have}")
+            raise SystemExit(f"region {w!r}: no such region; {mpath} has {have}")
         out.append(name)
     return out
 
@@ -268,14 +277,11 @@ def draw(ax, df, metric, title, norm, labels=True, ylabel=True, partial_ring=Fal
     ax.set_xticklabels([f"{t:,.0f}" for t in ticks])
     ax.minorticks_off()
     ax.tick_params(labelleft=True)
-    ax.set_title(title, loc="left", fontsize=11, color=INK)
+    ax.set_title(title, loc="left", fontsize=fs(11), color=INK)
     ax.set_facecolor(SURFACE)
     ax.grid(True, which="major", color=GRID, linewidth=0.8, zorder=0)
     ax.set_axisbelow(True)
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
-    for s in ("left", "bottom"):
-        ax.spines[s].set_color(MUTED)
+    frame(ax)
     ax.tick_params(colors=MUTED, which="both")
 
 
@@ -308,7 +314,7 @@ def place_labels(fig, ax):
         best = None
         for dx, dy, ha, va in CANDIDATES:
             t = ax.annotate(text, (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha,
-                            va=va, fontsize=8, color=INK, zorder=4)
+                            va=va, fontsize=fs(8), color=INK, zorder=4)
             bb = t.get_window_extent(renderer)
             if not hits(bb):
                 best = bb
@@ -317,7 +323,7 @@ def place_labels(fig, ax):
         if best is None:                          # nothing free: fall back to the first candidate
             dx, dy, ha, va = CANDIDATES[0]
             t = ax.annotate(text, (x, y), xytext=(dx, dy), textcoords="offset points", ha=ha,
-                            va=va, fontsize=8, color=INK, zorder=4)
+                            va=va, fontsize=fs(8), color=INK, zorder=4)
             best = t.get_window_extent(renderer)
         placed.append(best)
 
@@ -349,13 +355,13 @@ def flag_figure(df, regions, sid, args, out):
     if df["clipped"].any():
         handles.append(Line2D([], [], marker="s", ls="", ms=9, mfc="#bdbdb8", mec=INK, mew=0.7,
                               label=f"square: ≥1 angle with {'S%d ' % sid if sid else ''}clipped (variance is a lower bound)"))
-    axes[0].legend(handles=handles, loc="upper left", frameon=False, fontsize=8.5, labelcolor=INK)
+    axes[0].legend(handles=handles, loc="upper left", frameon=False, fontsize=fs(8.5), labelcolor=INK)
     if not args.no_labels:
         place_labels(fig, axes[0])
     name = "design_space_flag_" + "_".join(regions) + (f"_S{sid}" if sid else "") + \
         ("_fullonly" if args.full_only else "")
     png = out / f"{name}.png"
-    fig.savefig(png, dpi=args.dpi, facecolor=SURFACE)
+    fig.savefig(png, dpi=args.dpi, facecolor="none" if args.transparent else SURFACE, transparent=args.transparent)
     plt.close(fig)
 
     cols = ["run_name", "reynolds_number", "cauchy_edgewise"] + \
@@ -398,7 +404,9 @@ def main():
     ap.add_argument("--separate-cbars", action="store_true")
     ap.add_argument("--full-only", action="store_true", help="plot only full-sweep runs")
     ap.add_argument("--no-labels", action="store_true", help="hide dataset names")
+    add_style_args(ap)
     args = ap.parse_args()
+    apply_style(args)
 
     panels = ["max", "p90"] if args.panels == "both" else [p.strip() for p in args.panels.split(",") if p.strip()]
     bad = [p for p in panels if p not in METRICS]
@@ -505,7 +513,7 @@ def main():
             and (df["full_sweep"] == False).any():                                   # noqa: E712
         handles.append(Line2D([], [], marker="o", ls="", ms=11, mfc="none", mec=MUTED, mew=1.0,
                               label="partial sweep (value is a lower bound)"))
-    axes[0].legend(handles=handles, loc="upper left", frameon=False, fontsize=8.5, labelcolor=INK)
+    axes[0].legend(handles=handles, loc="upper left", frameon=False, fontsize=fs(8.5), labelcolor=INK)
 
     if not args.no_labels:
         place_labels(fig, axes[0])
@@ -522,7 +530,7 @@ def main():
     if args.cbar == "linear":
         name += "_linear"
     png = out / f"{name}.png"
-    fig.savefig(png, dpi=args.dpi, facecolor=SURFACE)
+    fig.savefig(png, dpi=args.dpi, facecolor="none" if args.transparent else SURFACE, transparent=args.transparent)
     plt.close(fig)
 
     cols = ["run_name", "reynolds_number", "cauchy_edgewise", "nvar_max", "nvar_max_angle_deg",
