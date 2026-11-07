@@ -122,6 +122,20 @@ python check_accel_timing.py "D:/GE_blade/<ring-down folder>" --mode-hz 55 70 --
    (b) is each read unbroken; (c) fs under "fill then overwrite" vs the postmortem
    model. Panels (a) and (b) use no time stamps and no assumed sample rate.
 
+   Result on the Oct 2026 ring-downs (7 Nov 2026): reads are unbroken; after ~3.8 s
+   samples are lost between reads; before that the buffer is still filling and
+   nothing is lost; fs 1482-1491 Hz, consistent with the UG's 1493 Hz. So spectra
+   (extract_run_summary 1.4-gap) use only reads after the latest possible overflow
+   onset (column post_overflow / accel_overflow_onset_s, ~3.5-3.9 s per capture).
+   After overflow the data are ~0.69 s older than their time stamps: do not use
+   accel-vs-load-cell phase from these captures.
+
+   The real fix is on the acquisition side: on Windows the FTDI latency timer stays
+   at 16 ms (set_low_latency only works on Linux), reads come every ~67 ms and the
+   buffer overflows. Set Device Manager > Ports > USB Serial Port > Port Settings >
+   Advanced > Latency Timer = 1 ms, then test_modbus.py stream should show 0 overruns
+   and ~1493 samples/s.
+
    Reads `timing_summary.txt` / `timing_check.png`: are reads full, what is the
    sensor rate fs (measured from the ring-downs, no vendor value used), and which
    read time anchors each block (lag, measured from the production captures).

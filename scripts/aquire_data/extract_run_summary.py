@@ -70,8 +70,9 @@ from utils.run_loader import (  # noqa: E402
 from utils import coordinate_transforms as ct  # noqa: E402
 from utils import accel_timing as at  # noqa: E402
 
-EXTRACTOR_VERSION = "1.3-gap"   # 1.1: per-axis nvar_s{k}_{x,y,z}; 1.2: per-axis PSDs (accel + load cell) and load-cell CSDs;
+EXTRACTOR_VERSION = "1.4-gap"   # 1.1: per-axis nvar_s{k}_{x,y,z}; 1.2: per-axis PSDs (accel + load cell) and load-cell CSDs;
                                 # 1.3-gap: accel spectra on the gap-aware time base (Nov 2026 timing fix), read/loss stats
+                                # 1.4-gap: spectra skip the reads before the ring buffer overflows (no gaps there yet)
 
 G = 9.80665
 NUM_SENSORS = 4
@@ -185,7 +186,8 @@ def analyze_angle(i, angle_val, accel_path, load_path, info, meta_rows, enc, arg
                accel_block_lag=timing.get("lag", np.nan),
                accel_reads_full_frac=rs.get("frac_reads_full", np.nan),
                accel_read_rate_hz=rs.get("read_rate_hz", np.nan),
-               accel_lost_frac=rs.get("lost_frac_at_fs", np.nan))
+               accel_lost_frac=rs.get("lost_frac_at_fs", np.nan),
+               accel_overflow_onset_s=timing.get("overflow_onset_s", np.nan))
     # spectra: gap-aware grid (slot) at the sensor rate, or the old even spacing at the delivered rate
     gap_aware = timing["method"] == "gap_aware"
     fs_spec = timing["fs_hz"] if gap_aware else fs_acc
@@ -214,11 +216,13 @@ def analyze_angle(i, angle_val, accel_path, load_path, info, meta_rows, enc, arg
 
     # ---- accel variance / spectra ----
     keep = t >= args.trim_s
+    # spectra: on the gap-aware time base only rows after the ring buffer has overflowed fit the model
+    skeep = keep & accel_df["post_overflow"].to_numpy() if gap_aware else keep
     acc_g = (raw * mg / 1000.0).reshape(-1, NUM_SENSORS, 3)                         # (N,4,3) in g
     mags = np.linalg.norm(acc_g, axis=2)                                             # (N,4) in g
     a_c = info["a_c_g"]
     spec = {}
-    nper = min(args.nperseg, int(keep.sum()))
+    nper = min(args.nperseg, int(skeep.sum()))
     psd_acc = []
     psd_axes = np.full((NUM_SENSORS, 3, nper // 2 + 1), np.nan, dtype=np.float32) if nper >= 16 else None
     for s in range(NUM_SENSORS):
@@ -232,13 +236,13 @@ def analyze_angle(i, angle_val, accel_path, load_path, info, meta_rows, enc, arg
             vj = float(np.var(acc_g[keep, s, j])) if len(x) else np.nan
             row[f"var_g2_s{s + 1}_{ax_name}"] = vj
             row[f"nvar_s{s + 1}_{ax_name}"] = vj / a_c ** 2 if math.isfinite(a_c) and a_c > 0 else np.nan
-        if len(x) >= 16 and math.isfinite(fs_spec):
-            f, p = accel_psd(x, keep)
+        if skeep.sum() >= 16 and math.isfinite(fs_spec):
+            f, p = accel_psd(mags[skeep, s], skeep)
             pk_f, pk_p = spectrum_peak(f, p, args.min_peak_hz)
             psd_acc.append(p)
             for j, ax_name in enumerate("xyz"):
-                xa = acc_g[keep, s, j]
-                _, pa = accel_psd(xa, keep)
+                xa = acc_g[skeep, s, j]
+                _, pa = accel_psd(xa, skeep)
                 psd_axes[s, j] = pa
                 row[f"peak_hz_s{s + 1}_{ax_name}"], row[f"peak_psd_s{s + 1}_{ax_name}"] = \
                     spectrum_peak(f, pa, args.min_peak_hz)

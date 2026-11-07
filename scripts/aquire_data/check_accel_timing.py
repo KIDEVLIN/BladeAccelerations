@@ -143,8 +143,8 @@ def group_verdict(fs, coh, coh_del, dlv, n_pairs, lobes):
     if n_pairs < MIN_PAIRS_VERDICT:
         return "inconclusive", f"only {n_pairs} clean read pairs (need {MIN_PAIRS_VERDICT})"
     if max(coh, coh_del) < MIN_COHERENCE:
-        return "inconclusive", (f"no hypothesis fits well (best {max(coh, coh_del):.2f} < {MIN_COHERENCE}); "
-                                "the chosen mode is probably not clean enough (try --mode-hz)")
+        return "inconclusive", (f"no hypothesis fits well (best {max(coh, coh_del):.3f} < {MIN_COHERENCE}); "
+                                "for ring-downs run --buffer: the first ~3-4 s have no gaps, which this check does not model")
     if coh_del >= coh - 0.05 or abs(fs - dlv) < 0.03 * dlv:
         if coh_del >= MIN_COHERENCE:
             return "even", "the delivered rate explains the read-to-read phase"

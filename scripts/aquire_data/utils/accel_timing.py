@@ -74,6 +74,17 @@ DEFAULT_SENSOR_FS_HZ = 1493.0   # vendor measurement at ODR=1600 (AF10R1 UG sec 
 # --------------------------------------------------
 SENSOR_FS_HZ = DEFAULT_SENSOR_FS_HZ
 BLOCK_LAG = 0
+BUFFER_CAPACITY = 1024          # AF10R1 ring buffer, sample-sets (UG 1.1)
+
+# What the Nov 2026 checks found on the Oct 2026 ring-downs (check_accel_timing.py --buffer):
+#   * each read is an unbroken run of consecutive samples (in-read contiguity 0.98-0.99 at every row)
+#   * after ~3.8 s, samples are lost BETWEEN reads (boundary score -0.42, as predicted for ~16 lost/read)
+#   * before that, reads join up: the ring buffer is still filling (RESET_BUF + START just before t = 0)
+#   * fs 1482-1491 Hz from the data, consistent with the UG's 1493 Hz (5-min COUNTER measurement)
+#   * "fill then overwrite" fits better than "gaps from t = 0" (0.72 vs 0.56); not ~1, so each read's
+#     placement after overflow is uncertain by up to ~1.5 ms (probably USB delay before the stamp)
+# So the gap-aware time base holds only once the buffer has overflowed; spectra skip the reads before
+# latest_overflow_onset(). Samples after overflow are ~BUFFER_CAPACITY / fs (~0.69 s) older than their stamp.
 
 
 # --------------------------------------------------
@@ -491,6 +502,16 @@ def competing_lobes(fs_grid, curve, fs_min, tol=0.1):
 # mode frequency in cycles/sample, measured inside reads.
 # --------------------------------------------------
 
+def latest_overflow_onset(reads, fs=DEFAULT_SENSOR_FS_HZ, capacity=1024, block_len=84):
+    """Latest read by which the ring buffer must have overflowed, assuming it
+    was empty at t = 0 (START before t = 0 only makes overflow earlier).
+    Returns (read index, its time stamp); (n_reads, inf) if it never must.
+    From this read on, the gap-aware (between-read gap) time base holds."""
+    occ_min = fs * reads.t - block_len * np.arange(reads.n)
+    on = np.flatnonzero(occ_min >= capacity)
+    return (int(on[0]), float(reads.t[on[0]])) if on.size else (int(reads.n), float("inf"))
+
+
 def block_phases(x, batch_time, band_c, block_len=84, min_r2=0.5):
     """Mode fit in every full read. band_c: (lo, hi) cycles/sample.
     Returns dict(c, A, r2, keep, idx, X, reads)."""
@@ -574,4 +595,4 @@ def fit_overwrite_model(bp, fs_grid, K_grid, block_len=84):
     i, j = np.unravel_index(np.nanargmax(M), M.shape) if consec.size else (0, 0)
     return dict(map=M, fs_grid=fs_grid, K_grid=K_grid, fs=float(fs_grid[i]), K=float(K_grid[j]),
                 coherence=float(M[i, j]), profile=M.max(axis=1), postmortem_profile=pm,
-                postmortem=float(np.nanmax(pm)), no_loss=no_loss, n_pairs=int(consec.size))
+                postmortem=float(np.nanmax(pm)) if consec.size else np.nan, no_loss=no_loss, n_pairs=int(consec.size))

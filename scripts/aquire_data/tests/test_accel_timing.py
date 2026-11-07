@@ -182,3 +182,12 @@ def test_overwrite_model_recovers_fs_and_onset():
     assert fit["coherence"] > fit["postmortem"] and fit["coherence"] > fit["no_loss"] + 0.2
     starts = at.overwrite_starts(at.find_reads(bt), fit["fs"], fit["K"])
     assert np.abs(starts - idx[::84])[:onset].max() <= 1          # reads before the onset placed exactly
+
+
+def test_latest_overflow_onset_is_never_early():
+    """Spectra skip reads before this bound, so it must never fall before the
+    true onset, whatever the START lead."""
+    for off in (0.0, 0.1, 0.3):
+        bt, x, idx, onset = sim.simulate_buffer(lambda t: np.zeros(t.size), "overwrite", t_start_offset=off, rng=1)
+        b, t_on = at.latest_overflow_onset(at.find_reads(bt), FS, 1024)
+        assert b >= onset

@@ -55,6 +55,10 @@ the read's time stamp, with gaps between reads. The returned frame has
     batch_time  the raw CSV time stamp of the row's read
     slot        integer position on the 1/fs grid (for gap-aware spectra:
                 accel_timing.masked_welch(x, df["slot"], fs))
+    post_overflow  True from the read by which the 1024-set ring buffer must
+                have overflowed. Before that (first ~3-4 s) nothing is lost and
+                the gap model does not hold: use only post_overflow rows for
+                spectra. Variances can use all rows.
 timing="even" gives the OLD reconstruction (rows evenly spread between
 read times), which shifts every frequency ~19% low: use it only to
 compare with old results. Variances do not depend on the timing.
@@ -165,10 +169,14 @@ def load_accel_csv(path, timing="gap_aware", fs=None, lag=None):
                 # (unverified: measure other ODRs with check_accel_timing.py)
                 fs = _at.SENSOR_FS_HZ * int(m.group(1)) / 1600.0
         lag = _at.BLOCK_LAG if lag is None else lag
-        t, slots, info = _at.gap_aware_times(df["batch_time"].to_numpy(dtype=float), fs, lag)
+        bt = df["batch_time"].to_numpy(dtype=float)
+        t, slots, info = _at.gap_aware_times(bt, fs, lag)
         df["time"] = t
         df["slot"] = slots
-        df.attrs["timing"] = dict(method="gap_aware", **info)
+        # before the ring buffer overflows nothing is lost, so the gap model does not hold yet
+        _, t_on = _at.latest_overflow_onset(_at.find_reads(bt), fs, _at.BUFFER_CAPACITY)
+        df["post_overflow"] = bt >= t_on
+        df.attrs["timing"] = dict(method="gap_aware", overflow_onset_s=t_on, **info)
     else:
         raise ValueError(f"timing must be 'gap_aware' or 'even', not {timing!r}")
     mg_per_lsb = _read_header_mg_per_lsb(path)
