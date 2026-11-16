@@ -2,22 +2,29 @@
 """
 plot_displacement.py
 
+requires package ffmpeg for mp4 animation, otherwise a gif is written with Pillow
+
 Blade displacement from the accelerometers: integrates each sensor's acceleration twice, for ONE trial
 (one motor angle at one tunnel condition = one angle_*deg.csv inside one run directory), and plots
 
     top panel     flapwise displacement vs physical time, S1..S4
     bottom panel  edgewise displacement vs physical time, S1..S4
 
-Sensor layout (blade root at r = 0, R = 28 cm). Initial position of every sensor is 0 in the edgewise
-direction; spanwise positions are fixed:
+With --animate it also writes a two-panel animation (flapwise on top, edgewise below): the four sensors
+are dots on a cubic spline along the span, so the blade shape is visible as it moves.
+
+Sensor layout (blade root at r = 0, R = 28 cm):
 
     S1  r/R = 0.13      S2  r/R = 0.26      S3  r/R = 0.35      S4  r/R = 0.48
 
 Usage (from scripts/aquire_data):
-    python plot_displacement.py Data/Production_10-8-26/DTU10MW_704psi_500fs --angle 170 --out Production_summaries/figures
+     python plot_displacement.py F:/FlexibleBlade/Production_10-8-26/DTU10MW_704psi_600fs --angle 120 --animate --out Production_summaries/figures
+    python plot_displacement.py Data/Production_10-8-26/DTU10MW_704psi_500fs --angle 170
     python plot_displacement.py Data/.../DTU10MW_704psi_500fs/angle_+170.00deg.csv
-    python plot_displacement.py <run_dir> --angle 170 --t0 0.5 --t1 3 --fc 2 --flap-axis z --edge-axis x
-    python plot_displacement.py <run_dir> --angle 170 --edge-axis=-x      # note the "=" for a negative sign
+    python plot_displacement.py <run_dir> --angle 170 --t0 0.5 --t1 3 --fc 2 --flap-axis z
+    python plot_displacement.py <run_dir> --angle 170 --flap-axis=-z       # note the "=" for a negative sign
+    python plot_displacement.py <run_dir> --angle 170 --animate
+    python plot_displacement.py <run_dir> --angle 170 --animate --anim-t0 1.0 --anim-duration 0.5 --slowdown 40
 
 The first argument is either a run directory (then --angle picks the nearest requested angle) or the
 angle_*.csv file itself. The run directory supplies the tunnel condition (run_metadata.json) for the title.
@@ -26,25 +33,29 @@ Method (per sensor, per axis)
     1. counts -> g (sensitivity from the CSV header) -> m/s^2
     2. resample onto a uniform time grid at the measured sample rate (the CSV time column is stamped per
        FIFO batch; utils/run_loader.py reconstructs a per-sample time, which is used here)
-    3. remove the mean (the static part: gravity and the mean aerodynamic load) and high-pass at --fc
-       (zero-phase Butterworth)
-    4. integrate with the trapezoid rule from rest (v = 0, x = 0), high-passing the velocity and the
-       displacement at --fc again, because any DC or very-low-frequency error in a double integral
-       grows as t^2
-    5. crop to [--t0, --t1] and, with --reference start (default), subtract the value at the first
-       plotted sample so every trace starts at 0 (--reference mean centres them on their mean instead)
+    3. remove the mean and high-pass the whole record at --fc (zero-phase Butterworth), then crop to
+       [--t0, --t1] so the filter's start-up transient is excluded
+    4. integrate the cropped acceleration with the trapezoid rule. The integration constants are chosen so
+       that the mean velocity and the mean displacement over the window are both exactly zero for every
+       sensor (the window mean of the acceleration is removed first, otherwise the velocity would ramp)
+    So the displacement is the motion about each sensor's mean position over the window.
 
 IMPORTANT assumptions to check
-    * The accelerometer axes are the SENSOR's x, y, z, not blade directions. Which sensor axis is flapwise
-      and which is edgewise depends on how the boards are mounted: set --flap-axis / --edge-axis
-      (defaults z and x are a guess). Prefix with - to flip the sign.
+    * The accelerometer axes are the SENSOR's x, y, z, not blade directions. Edgewise is the sensor y axis
+      (default). The flapwise default is the sensor z axis, which is a guess: set --flap-axis to match how
+      the boards are mounted. Prefix with - to flip the sign.
     * Displacement is only meaningful for frequencies above --fc. Choose --fc a factor of ~3 below the
       lowest structural frequency you care about (e.g. the first flap/edge natural frequency from the
-      ring-down tests); motion slower than that is removed, as is any static deflection.
-    * Output is the displacement of each sensor relative to its starting position, in the direction of the
-      chosen sensor axis (small-displacement, no rotation of the sensor with the blade).
+      ring-down tests); slower motion, including any static deflection, is removed.
+    * Zero mean only fixes the constants; it cannot remove drift that is not constant. If a trace wanders
+      slowly, raise --fc.
+    * Small-displacement assumption: each sensor moves along its chosen axis and does not rotate with the
+      blade.
+    * Animation: the blade root (r/R = 0) is treated as fixed at zero displacement and the spline runs from
+      the root to S4 (r/R = 0.48). The spline is clamped (zero slope) at the root. Between the sensors it is
+      an interpolation, not a measurement.
 
-Requires: numpy pandas scipy matplotlib
+Requires: numpy pandas scipy matplotlib (animation: ffmpeg for mp4, otherwise a gif is written with Pillow)
 """
 
 import argparse
@@ -59,7 +70,9 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt                                   # noqa: E402
+from matplotlib.lines import Line2D                               # noqa: E402
 from scipy.integrate import cumulative_trapezoid                  # noqa: E402
+from scipy.interpolate import CubicSpline                         # noqa: E402
 from scipy.signal import butter, sosfiltfilt                      # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -72,7 +85,7 @@ from plot_angle_sweep import INK, MUTED, SURFACE, SENSOR_COLORS, style_axes   # 
 G = 9.80665                       # m/s^2
 R_M = 0.28                        # blade length R (m)
 R_OVER_R = (0.13, 0.26, 0.35, 0.48)           # spanwise position of S1..S4
-SPAN_POS_M = tuple(x * R_M for x in R_OVER_R)  # (m); the edgewise start position is 0 for all
+SPAN_POS_M = tuple(x * R_M for x in R_OVER_R)
 NUM_SENSORS = 4
 INT16_MAX = 32767
 SAT_LEVEL = 0.995
@@ -138,18 +151,20 @@ def highpass(x, fs, fc, order=4):
     return sosfiltfilt(sos, x, axis=0)
 
 
-def double_integrate(a, fs, fc):
-    """a: (N, k) acceleration in m/s^2 on a uniform grid. Returns (velocity, displacement), zero-drift."""
-    a = highpass(a - a.mean(axis=0), fs, fc)
+def double_integrate_zero_mean(a, fs):
+    """a: (N, k) acceleration (m/s^2) on a uniform grid. Integrates twice with the integration constants
+    chosen so that the mean velocity and the mean displacement are zero for every column.
+    Returns (velocity, displacement)."""
+    a = a - a.mean(axis=0)                      # a constant acceleration would make v ramp and d grow as t^2
     v = cumulative_trapezoid(a, dx=1.0 / fs, axis=0, initial=0.0)
-    v = highpass(v, fs, fc)
+    v = v - v.mean(axis=0)
     d = cumulative_trapezoid(v, dx=1.0 / fs, axis=0, initial=0.0)
-    d = highpass(d, fs, fc)
+    d = d - d.mean(axis=0)
     return v, d
 
 
 def load_trial(accel_path, fs_override=None):
-    """Returns (t_uniform, accel_g (N, 4 sensors, 3 axes), fs, raw int16 array)."""
+    """Returns (t_uniform, accel_g (N, 4 sensors, 3 axes), fs, raw int16 array, mg_per_lsb)."""
     df, _ = load_accel_csv(accel_path)
     mg = df.attrs.get("mg_per_lsb")
     if mg is None:
@@ -168,27 +183,97 @@ def load_trial(accel_path, fs_override=None):
 
 
 # --------------------------------------------------
-# Plot
+# Static plot
 # --------------------------------------------------
 
 def make_figure(t, d_flap, d_edge, labels, title, flap_name, edge_name, args, out_png):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 7.2), sharex=True, facecolor=SURFACE,
                                    constrained_layout=True)
-    for ax, d, name in ((ax1, d_flap, "Flapwise"), (ax2, d_edge, "Edgewise")):
+    for ax, d, name, axname in ((ax1, d_flap, "Flapwise", flap_name), (ax2, d_edge, "Edgewise", edge_name)):
         for s in range(NUM_SENSORS):
             ax.plot(t, d[:, s] * 1000.0, color=SENSOR_COLORS[s], lw=1.1, label=labels[s])
         ax.axhline(0, color=MUTED, lw=0.6, alpha=0.6)
         ax.set_ylabel(f"{name} displacement (mm)", color=INK)
-        ax.set_title(f"{name}  (sensor {flap_name if name == 'Flapwise' else edge_name} axis)",
-                     loc="left", fontsize=10, color=INK)
+        ax.set_title(f"{name}  (sensor {axname} axis)", loc="left", fontsize=10, color=INK)
         style_axes(ax)
-    ax1.legend(loc="upper right", ncol=NUM_SENSORS, frameon=False, fontsize=9, labelcolor=INK)
+    ax1.legend(loc="upper right", ncol=2, frameon=False, fontsize=9, labelcolor=INK)
     ax2.set_xlabel("Time (s)", color=INK)
     ax2.set_xlim(t[0], t[-1])
     fig.suptitle(title, x=0.01, ha="left", fontsize=11, color=INK)
     out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, dpi=args.dpi, facecolor=SURFACE)
     plt.close(fig)
+
+
+# --------------------------------------------------
+# Animation
+# --------------------------------------------------
+
+def spline_curve(r_nodes, y_nodes, n=120):
+    """Cubic spline through the root (fixed, zero slope) and the sensor displacements."""
+    cs = CubicSpline(r_nodes, y_nodes, bc_type=((1, 0.0), (2, 0.0)))
+    xs = np.linspace(r_nodes[0], r_nodes[-1], n)
+    return xs, cs(xs)
+
+
+def make_animation(tw, d_flap, d_edge, fs, title, flap_name, edge_name, args, out_base):
+    from matplotlib import animation
+
+    n = len(tw)
+    t_start = args.anim_t0 if args.anim_t0 is not None else tw[0]
+    i0 = min(int(np.searchsorted(tw, t_start)), n - 2)
+    i1 = min(max(int(np.searchsorted(tw, t_start + args.anim_duration)), i0 + 2), n)
+    step = max(1, int(round(fs / (args.fps * args.slowdown))))
+    frames = np.arange(i0, i1, step)
+    eff_slow = fs / (step * args.fps)            # actual slowdown after rounding the frame step to samples
+    print(f"  Animation: {len(frames)} frames, data {tw[i0]:.3f} to {tw[i1 - 1]:.3f} s, "
+          f"{len(frames) / args.fps:.1f} s of video at {args.fps:g} fps ({eff_slow:.0f}x slower than real time)")
+
+    r_nodes = np.concatenate([[0.0], R_OVER_R])
+    ymax = 1.15 * max(np.abs(d_flap[i0:i1]).max(), np.abs(d_edge[i0:i1]).max()) * 1000.0
+    ymax = ymax if ymax > 0 else 1.0
+
+    fig, axes = plt.subplots(2, 1, figsize=(9, 6.6), sharex=True, sharey=True, facecolor=SURFACE,
+                             constrained_layout=True)
+    arts = []
+    for ax, name, axname in ((axes[0], "Flapwise", flap_name), (axes[1], "Edgewise", edge_name)):
+        ax.axhline(0, color=MUTED, lw=0.7, alpha=0.6, ls=(0, (4, 3)))
+        (line,) = ax.plot(r_nodes, np.zeros_like(r_nodes), color=INK, lw=2.0, zorder=3)
+        dots = ax.scatter(R_OVER_R, np.zeros(NUM_SENSORS), s=95, c=SENSOR_COLORS, edgecolor=SURFACE,
+                          linewidth=1.2, zorder=5)
+        ax.plot([0.0], [0.0], marker="s", ms=8, color=INK, zorder=4)         # fixed root
+        ax.set_ylabel(f"{name} displacement (mm)", color=INK)
+        ax.set_title(f"{name}  (sensor {axname} axis)", loc="left", fontsize=10, color=INK)
+        style_axes(ax)
+        arts.append((line, dots))
+    axes[0].set_ylim(-ymax, ymax)
+    axes[1].set_xlim(-0.02, R_OVER_R[-1] + 0.04)
+    axes[1].set_xlabel("Spanwise position r/R  (root at 0)", color=INK)
+    handles = [Line2D([], [], marker="o", ls="", ms=8, color=SENSOR_COLORS[s], mec=SURFACE,
+                      label=f"S{s + 1}  r/R = {R_OVER_R[s]:.2f}") for s in range(NUM_SENSORS)]
+    axes[0].legend(handles=handles, loc="upper left", ncol=2, frameon=False, fontsize=9, labelcolor=INK)
+    sup = fig.suptitle(title, x=0.01, ha="left", fontsize=11, color=INK)
+
+    def update(k):
+        i = frames[k]
+        for (line, dots), d in zip(arts, (d_flap, d_edge)):
+            y = d[i] * 1000.0
+            xs, ys = spline_curve(r_nodes, np.concatenate([[0.0], y]))
+            line.set_data(xs, ys)
+            dots.set_offsets(np.column_stack([R_OVER_R, y]))
+        sup.set_text(f"{title}\nt = {tw[i]:.3f} s   ({eff_slow:.0f}x slower than real time)")
+        return []
+
+    anim = animation.FuncAnimation(fig, update, frames=len(frames), blit=False)
+    fmt = args.anim_format
+    if fmt == "mp4" and not animation.writers.is_available("ffmpeg"):
+        print("  NOTE: ffmpeg not found; writing a gif instead (--anim-format gif)")
+        fmt = "gif"
+    path = out_base.with_name(out_base.stem + "_animation").with_suffix("." + fmt)
+    writer = animation.FFMpegWriter(fps=args.fps) if fmt == "mp4" else animation.PillowWriter(fps=args.fps)
+    anim.save(path, writer=writer, dpi=args.anim_dpi, savefig_kwargs=dict(facecolor=SURFACE))
+    plt.close(fig)
+    return path
 
 
 # --------------------------------------------------
@@ -200,18 +285,30 @@ def main():
     ap.add_argument("trial", help="run directory (with --angle) or the angle_*.csv file of one trial")
     ap.add_argument("--angle", type=float, help="requested motor angle (deg) of the trial, nearest is used")
     ap.add_argument("--flap-axis", default="z", help="sensor axis for flapwise motion: x, y, z, or -x ... (default z)")
-    ap.add_argument("--edge-axis", default="x", help="sensor axis for edgewise motion (default x)")
+    ap.add_argument("--edge-axis", default="y", help="sensor axis for edgewise motion (default y)")
     ap.add_argument("--fc", type=float, default=2.0,
-                    help="high-pass cutoff (Hz) used to stop integration drift (default 2)")
+                    help="high-pass cutoff (Hz) applied to the acceleration to stop integration drift (default 2)")
     ap.add_argument("--t0", type=float, default=0.5,
-                    help="first plotted time (s); the start of the capture holds filter transients (default 0.5)")
-    ap.add_argument("--t1", type=float, help="last plotted time (s) (default end of capture)")
-    ap.add_argument("--reference", choices=["start", "mean"], default="start",
-                    help="start: traces start at 0 (default); mean: traces are centred on their mean")
+                    help="first plotted/integrated time (s); the start of the capture holds filter transients (default 0.5)")
+    ap.add_argument("--t1", type=float, help="last plotted/integrated time (s) (default end of capture)")
     ap.add_argument("--fs", type=float, help="override the sample rate (Hz); default is measured from the CSV")
     ap.add_argument("--csv", action="store_true", help="also write the plotted displacements to a csv")
     ap.add_argument("--out", help="output folder (default <run_dir>/analysis)")
     ap.add_argument("--dpi", type=int, default=200)
+
+    an = ap.add_argument_group("animation")
+    an.add_argument("--animate", action="store_true",
+                    help="also write a two-panel animation (flapwise, edgewise) with the sensors as dots on a spline")
+    an.add_argument("--anim-t0", type=float, help="start time (s) of the animated segment (default: start of the window)")
+    an.add_argument("--anim-duration", type=float, default=1.0,
+                    help="seconds of DATA to animate (default 1.0)")
+    an.add_argument("--slowdown", type=float, default=20.0,
+                    help="playback is this many times slower than real time (default 20; a 1 s segment becomes "
+                         "20 s of video at 30 fps)")
+    an.add_argument("--fps", type=float, default=30.0, help="video frame rate (default 30)")
+    an.add_argument("--anim-format", choices=["mp4", "gif"], default="mp4",
+                    help="mp4 needs ffmpeg (falls back to gif if it is missing)")
+    an.add_argument("--anim-dpi", type=int, default=110)
     args = ap.parse_args()
 
     run_dir, accel_path, requested = find_trial(args.trial, args.angle)
@@ -237,22 +334,19 @@ def main():
                 print(f"  WARN: S{s + 1} {'xyz'[j]} axis was at full scale for {100 * sat[s, j]:.1f}% of samples "
                       "(clipped; displacement is underestimated)")
 
-    # integrate every sensor for the two chosen axes
-    d = {}
-    for name, j, sign in (("flap", fi, fsign), ("edge", ei, esign)):
-        a = sign * acc_g[:, :, j] * G                       # (N, 4) m/s^2
-        _, disp = double_integrate(a, fs, args.fc)
-        d[name] = disp
-
     t1 = args.t1 if args.t1 is not None else t[-1]
     m = (t >= args.t0) & (t <= t1)
     if m.sum() < 16:
         raise SystemExit(f"no samples in the window {args.t0:g} to {t1:g} s")
     tw = t[m]
-    out = {}
-    for name in ("flap", "edge"):
-        w = d[name][m]
-        out[name] = w - (w[0] if args.reference == "start" else w.mean(axis=0))
+
+    # high-pass the whole record (so the filter transient is outside the window), crop, then integrate with
+    # the constants chosen so mean velocity = mean displacement = 0 for every sensor
+    disp = {}
+    for name, j, sign in (("flap", fi, fsign), ("edge", ei, esign)):
+        a = sign * acc_g[:, :, j] * G                                  # (N, 4) m/s^2
+        a = highpass(a - a.mean(axis=0), fs, args.fc)
+        _, disp[name] = double_integrate_zero_mean(a[m], fs)
 
     labels = [f"S{s + 1}  r/R = {R_OVER_R[s]:.2f}  (r = {100 * SPAN_POS_M[s]:.1f} cm)" for s in range(NUM_SENSORS)]
     bits = [run_dir.name]
@@ -268,14 +362,13 @@ def main():
     title = "   ·   ".join(bits)
 
     out_dir = Path(args.out) if args.out else run_dir / "analysis"
-    stem = f"displacement_{accel_path.stem}"
-    png = out_dir / f"{stem}.png"
-    make_figure(tw, out["flap"], out["edge"], labels, title, fname, ename, args, png)
+    png = out_dir / f"displacement_{accel_path.stem}.png"
+    make_figure(tw, disp["flap"], disp["edge"], labels, title, fname, ename, args, png)
     print(f"Wrote {png}")
 
     for name in ("flap", "edge"):
-        pp = np.ptp(out[name], axis=0) * 1000.0
-        rms = out[name].std(axis=0) * 1000.0
+        pp = np.ptp(disp[name], axis=0) * 1000.0
+        rms = disp[name].std(axis=0) * 1000.0
         print(f"  {name}wise  peak-to-peak (mm): " + ", ".join(f"S{s + 1} {pp[s]:.3g}" for s in range(NUM_SENSORS))
               + "   rms (mm): " + ", ".join(f"S{s + 1} {rms[s]:.3g}" for s in range(NUM_SENSORS)))
 
@@ -283,9 +376,13 @@ def main():
         tab = pd.DataFrame({"time_s": tw})
         for name in ("flap", "edge"):
             for s in range(NUM_SENSORS):
-                tab[f"{name}_s{s + 1}_mm"] = out[name][:, s] * 1000.0
+                tab[f"{name}_s{s + 1}_mm"] = disp[name][:, s] * 1000.0
         tab.to_csv(png.with_suffix(".csv"), index=False)
         print(f"Wrote {png.with_suffix('.csv')}")
+
+    if args.animate:
+        apath = make_animation(tw, disp["flap"], disp["edge"], fs, title, fname, ename, args, png)
+        print(f"Wrote {apath}")
 
 
 if __name__ == "__main__":
