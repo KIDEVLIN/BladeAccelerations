@@ -2,8 +2,6 @@
 """
 plot_displacement.py
 
-requires package ffmpeg for mp4 animation, otherwise a gif is written with Pillow
-
 Blade displacement from the accelerometers: integrates each sensor's acceleration twice, for ONE trial
 (one motor angle at one tunnel condition = one angle_*deg.csv inside one run directory), and plots
 
@@ -18,7 +16,6 @@ Sensor layout (blade root at r = 0, R = 28 cm):
     S1  r/R = 0.13      S2  r/R = 0.26      S3  r/R = 0.35      S4  r/R = 0.48
 
 Usage (from scripts/aquire_data):
-     python plot_displacement.py F:/FlexibleBlade/Production_10-8-26/DTU10MW_704psi_600fs --angle 120 --animate --out Production_summaries/figures
     python plot_displacement.py Data/Production_10-8-26/DTU10MW_704psi_500fs --angle 170
     python plot_displacement.py Data/.../DTU10MW_704psi_500fs/angle_+170.00deg.csv
     python plot_displacement.py <run_dir> --angle 170 --t0 0.5 --t1 3 --fc 2 --flap-axis z
@@ -33,12 +30,13 @@ Method (per sensor, per axis)
     1. counts -> g (sensitivity from the CSV header) -> m/s^2
     2. resample onto a uniform time grid at the measured sample rate (the CSV time column is stamped per
        FIFO batch; utils/run_loader.py reconstructs a per-sample time, which is used here)
-    3. remove the mean and high-pass the whole record at --fc (zero-phase Butterworth), then crop to
-       [--t0, --t1] so the filter's start-up transient is excluded
-    4. integrate the cropped acceleration with the trapezoid rule. The integration constants are chosen so
-       that the mean velocity and the mean displacement over the window are both exactly zero for every
-       sensor (the window mean of the acceleration is removed first, otherwise the velocity would ramp)
-    So the displacement is the motion about each sensor's mean position over the window.
+    3. remove the mean and high-pass the acceleration at --fc (zero-phase Butterworth)
+    4. integrate with the trapezoid rule from rest (v = 0, x = 0), high-passing the velocity and the
+       displacement at --fc again, because any DC or very-low-frequency error in a double integral
+       grows as t^2
+    5. crop to [--t0, --t1] (so the filter start-up transient is excluded) and, with --reference start
+       (default), subtract the value at the first plotted sample so every trace starts at 0
+       (--reference mean centres them on their mean instead)
 
 IMPORTANT assumptions to check
     * The accelerometer axes are the SENSOR's x, y, z, not blade directions. Edgewise is the sensor y axis
@@ -47,8 +45,11 @@ IMPORTANT assumptions to check
     * Displacement is only meaningful for frequencies above --fc. Choose --fc a factor of ~3 below the
       lowest structural frequency you care about (e.g. the first flap/edge natural frequency from the
       ring-down tests); slower motion, including any static deflection, is removed.
-    * Zero mean only fixes the constants; it cannot remove drift that is not constant. If a trace wanders
-      slowly, raise --fc.
+    * The high-pass is what keeps the integration from drifting; if a trace still wanders slowly, raise
+      --fc.
+    * Displacement falls as 1/f^2 for a given acceleration, so a ~100 Hz component that is obvious in the
+      acceleration or PSD can be tiny in displacement next to the 5-30 Hz motion. Use --fc 80 --fmax 120
+      (a band around it) to see it on its own.
     * Small-displacement assumption: each sensor moves along its chosen axis and does not rotate with the
       blade.
     * Animation: the blade root (r/R = 0) is treated as fixed at zero displacement and the spline runs from
@@ -146,20 +147,27 @@ def parse_axis(text):
 
 def highpass(x, fs, fc, order=4):
     if fc <= 0:
-        return x - x.mean(axis=0)
+        return x 
     sos = butter(order, fc, btype="highpass", fs=fs, output="sos")
     return sosfiltfilt(sos, x, axis=0)
 
 
-def double_integrate_zero_mean(a, fs):
-    """a: (N, k) acceleration (m/s^2) on a uniform grid. Integrates twice with the integration constants
-    chosen so that the mean velocity and the mean displacement are zero for every column.
-    Returns (velocity, displacement)."""
-    a = a - a.mean(axis=0)                      # a constant acceleration would make v ramp and d grow as t^2
+def lowpass(x, fs, fmax, order=4):
+    sos = butter(order, fmax, btype="lowpass", fs=fs, output="sos")
+    return sosfiltfilt(sos, x, axis=0)
+
+
+def double_integrate(a, fs, fc, fmax=None):
+    """a: (N, k) acceleration (m/s^2) on a uniform grid. Returns (velocity, displacement), drift-reduced:
+    the acceleration, velocity and displacement are each high-passed at fc. With fmax the acceleration is
+    also low-passed at fmax, so only the band fc..fmax is integrated."""
+    a = highpass(a, fs, fc)
+    if fmax:
+        a = lowpass(a, fs, fmax)
     v = cumulative_trapezoid(a, dx=1.0 / fs, axis=0, initial=0.0)
-    v = v - v.mean(axis=0)
+    v = highpass(v, fs, fc)
     d = cumulative_trapezoid(v, dx=1.0 / fs, axis=0, initial=0.0)
-    d = d - d.mean(axis=0)
+    d = highpass(d, fs, fc)
     return v, d
 
 
@@ -223,9 +231,12 @@ def make_animation(tw, d_flap, d_edge, fs, title, flap_name, edge_name, args, ou
     t_start = args.anim_t0 if args.anim_t0 is not None else tw[0]
     i0 = min(int(np.searchsorted(tw, t_start)), n - 2)
     i1 = min(max(int(np.searchsorted(tw, t_start + args.anim_duration)), i0 + 2), n)
-    step = max(1, int(round(fs / (args.fps * args.slowdown))))
+    step = max(1, int(round(fs / (args.fps * args.slowdown)))) * max(1, args.subsample)
     frames = np.arange(i0, i1, step)
     eff_slow = fs / (step * args.fps)            # actual slowdown after rounding the frame step to samples
+    f_ok = fs / (4.0 * step)                     # >= 4 frames per cycle below this frequency
+    print(f"  Animation frame spacing {1000.0 * step / fs:.2f} ms: motion up to ~{f_ok:.0f} Hz is resolved "
+          "(4+ frames per cycle); faster motion will look aliased or slowed")
     print(f"  Animation: {len(frames)} frames, data {tw[i0]:.3f} to {tw[i1 - 1]:.3f} s, "
           f"{len(frames) / args.fps:.1f} s of video at {args.fps:g} fps ({eff_slow:.0f}x slower than real time)")
 
@@ -288,9 +299,14 @@ def main():
     ap.add_argument("--edge-axis", default="y", help="sensor axis for edgewise motion (default y)")
     ap.add_argument("--fc", type=float, default=2.0,
                     help="high-pass cutoff (Hz) applied to the acceleration to stop integration drift (default 2)")
+    ap.add_argument("--fmax", type=float,
+                    help="also low-pass the acceleration at this frequency (Hz), so only the band --fc..--fmax is "
+                         "shown, e.g. --fc 80 --fmax 120 isolates a 100 Hz component")
     ap.add_argument("--t0", type=float, default=0.5,
                     help="first plotted/integrated time (s); the start of the capture holds filter transients (default 0.5)")
     ap.add_argument("--t1", type=float, help="last plotted/integrated time (s) (default end of capture)")
+    ap.add_argument("--reference", choices=["start", "mean"], default="start",
+                    help="start: traces start at 0 (default); mean: traces are centred on their mean")
     ap.add_argument("--fs", type=float, help="override the sample rate (Hz); default is measured from the CSV")
     ap.add_argument("--csv", action="store_true", help="also write the plotted displacements to a csv")
     ap.add_argument("--out", help="output folder (default <run_dir>/analysis)")
@@ -306,6 +322,10 @@ def main():
                     help="playback is this many times slower than real time (default 20; a 1 s segment becomes "
                          "20 s of video at 30 fps)")
     an.add_argument("--fps", type=float, default=30.0, help="video frame rate (default 30)")
+    an.add_argument("--subsample", type=int, default=1,
+                    help="keep only every Nth animation frame (default 1 = all). N times fewer frames, so N times "
+                         "faster to render and N times shorter video; the playback slowdown drops by N and "
+                         "frequencies above ~1/(4 x frame spacing) are undersampled (a note is printed)")
     an.add_argument("--anim-format", choices=["mp4", "gif"], default="mp4",
                     help="mp4 needs ffmpeg (falls back to gif if it is missing)")
     an.add_argument("--anim-dpi", type=int, default=110)
@@ -323,6 +343,8 @@ def main():
     print(f"  {len(t)} samples, measured rate {fs:.1f} Hz, {mg} mg/LSB")
     if args.fc >= fs / 4:
         raise SystemExit(f"--fc {args.fc:g} Hz is too high for a {fs:.0f} Hz sample rate")
+    if args.fmax is not None and not (args.fc < args.fmax < fs / 2):
+        raise SystemExit(f"--fmax must be between --fc ({args.fc:g}) and the Nyquist frequency ({fs / 2:.0f} Hz)")
     odr = meta.get("accel_odr_hz")
     if odr and fs < 0.9 * odr:
         print(f"  WARN: measured rate {fs:.0f} Hz is below 90% of the ODR ({odr} Hz): dropped samples distort the integration")
@@ -340,13 +362,13 @@ def main():
         raise SystemExit(f"no samples in the window {args.t0:g} to {t1:g} s")
     tw = t[m]
 
-    # high-pass the whole record (so the filter transient is outside the window), crop, then integrate with
-    # the constants chosen so mean velocity = mean displacement = 0 for every sensor
+    # integrate the whole record, then crop to the window and apply the reference
     disp = {}
     for name, j, sign in (("flap", fi, fsign), ("edge", ei, esign)):
         a = sign * acc_g[:, :, j] * G                                  # (N, 4) m/s^2
-        a = highpass(a - a.mean(axis=0), fs, args.fc)
-        _, disp[name] = double_integrate_zero_mean(a[m], fs)
+        _, d = double_integrate(a, fs, args.fc, args.fmax)
+        w = d[m]
+        disp[name] = w - (w[0] if args.reference == "start" else w.mean(axis=0))
 
     labels = [f"S{s + 1}  r/R = {R_OVER_R[s]:.2f}  (r = {100 * SPAN_POS_M[s]:.1f} cm)" for s in range(NUM_SENSORS)]
     bits = [run_dir.name]
@@ -358,7 +380,7 @@ def main():
     tc = meta.get("tunnel_conditions") or {}
     if tc.get("velocity_freestream_m_s") is not None:
         bits.append(f"U = {tc['velocity_freestream_m_s']:.2f} m/s")
-    bits.append(f"high-pass {args.fc:g} Hz")
+    bits.append(f"band {args.fc:g}-{args.fmax:g} Hz" if args.fmax else f"high-pass {args.fc:g} Hz")
     title = "   ·   ".join(bits)
 
     out_dir = Path(args.out) if args.out else run_dir / "analysis"
