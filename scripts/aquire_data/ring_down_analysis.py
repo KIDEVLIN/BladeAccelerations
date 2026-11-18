@@ -81,9 +81,9 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from utils.run_loader import load_accel_csv                       # noqa: E402
-from plot_angle_sweep import INK, MUTED, SURFACE, CAT, SENSOR_COLORS, style_axes, parse_sensors   # noqa: E402
+from plot_angle_sweep import INK, MUTED, SURFACE, CAT, SENSOR_COLORS, fs, style_axes, parse_sensors   # noqa: E402
 
-NS = 4
+NS = 4 #number of sensors (S1..S4)
 AXES = "xyz"
 R_OVER_R = (0.13, 0.26, 0.35, 0.48)       # spanwise position of S1..S4 (R = 28 cm)
 INT16_MAX = 32767
@@ -178,18 +178,37 @@ def load_trial(path, fs_override, meta):
 # Flick detection
 # --------------------------------------------------
 
-def detect_flick(t, D, fs):
+def detect_flick(t, D, fs, component, quiet_s):
     """Onset time (s) of the flick, or None. Same rule as qc_trial in ring_down_aquire.py."""
+    #add something for if -x,y,z then if only looks at the column that is picked. 
+    if component == ["x"]:
+        D = D[:,:,0]
+    elif component == ["y"]:
+        D = D[:,:,1]
+    elif component == ["z"]:
+        D = D[:,:,2]
+    elif component == ["all"]:
+        D = D
+    else:
+        D=D
+    nq = int(quiet_s * fs)
     flat = D.reshape(len(D), -1)
-    mag = np.linalg.norm(flat - np.median(flat, axis=0), axis=1)
-    w = max(1, int(ONSET_WIN_S * fs))
+    mag = np.linalg.norm(flat - np.median(flat, axis=0), axis=1) #why is it subtracting the median?
+    w = max(1, int(ONSET_WIN_S * fs)) #create window size based on sample rate and window size.
     rms = np.sqrt(np.convolve(mag ** 2, np.ones(w) / w, mode="valid"))
-    noise = float(np.percentile(rms, 10))
+    nq = int(quiet_s * fs)
+    noise = float(np.median(rms[:max(1, nq - w)])) 
     above = np.where(rms > ONSET_SNR * noise)[0]
     if noise <= 0 or len(above) == 0:
         return None
-    return float(t[above[0]])
+    return float(t[above[0]+w-1]) #edited to make sure it is well after the flick.
 
+# --------------------------------------------
+# adding a component detection
+#-----------------------------------------------
+
+#def comp_tag(args):
+# #  return f"S{args.sensor_id}" + ("" if args.component == "mag" else f"_{args.component}")
 
 # --------------------------------------------------
 # Spectra, modes
@@ -441,6 +460,8 @@ def main():
     ap.add_argument("--fs", type=float, help="override the sample rate (Hz); default is the ODR from the CSV header")
     ap.add_argument("--out", help="output folder (default <folder>/analysis)")
     ap.add_argument("--dpi", type=int, default=200)
+    ap.add_argument("--component", nargs="+", choices=["all","x", "y", "z"], default=["z"], help = "which components to analyze (default z)")
+    ap.add_argument("--quiet-s", type=float, default=1.0, help="seconds at the start of the record that are quiet (noise level, static offset)")
     args = ap.parse_args()
 
     run_dir, path = find_trial(args.trial, args.label, args.k)
@@ -463,7 +484,7 @@ def main():
             print(f"  WARN: S{s + 1} {', '.join(bad)} at full scale for >= 1% of samples; use a higher --fs range "
                   "(clipped peaks bias the damping and mode shapes)")
 
-    onset = args.onset if args.onset is not None else detect_flick(t, D, fs)
+    onset = args.onset if args.onset is not None else detect_flick(t, D, fs, args.component, args.quiet_s)
     if onset is None:
         raise SystemExit("No flick detected (the signal never rose above the noise floor); give --onset T")
     print(f"  Flick at {onset:.3f} s{' (manual)' if args.onset is not None else ''}")
