@@ -206,6 +206,7 @@ def comp_tag(args):
     return f"S{args.sensor_id}" + ("" if args.component == "mag" else f"_{args.component}")
 
 
+# edit this to get normalization by fn
 def sym_psd(args):
     sub = "|a|" if args.component == "mag" else f"a_{args.component}"
     var = "St" if args.xaxis == "st" else "f"
