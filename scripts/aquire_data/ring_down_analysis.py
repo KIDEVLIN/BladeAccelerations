@@ -3,7 +3,7 @@
 ring_down_analysis.py
 
 Analysis of ONE ring-down (flick) trial recorded by ring_down_aquire.py: ring_<label>_<NNN>.csv.
-Writes three figures (and two csv tables):
+Writes four figures (and two csv tables):
 
   1. <stem>_signals.png   acceleration vs time, three panels (sensor x, y, z), all four accelerometers
                           overlaid (or only the ones given with --sensor). The flick is detected
@@ -11,7 +11,11 @@ Writes three figures (and two csv tables):
                           sensor and axis, and the damping ratio zeta is in the legend.
   2. <stem>_psd.png       power spectral density of the ring-down on log-log axes, same three panels, with
                           the pre-flick noise floor (grey dashed) and the identified modes (numbered).
-  3. <stem>_modes.png     mode shapes: the normalized amplitude of the identified modes along the span
+  3. <stem>_fft.png       the FFT amplitude spectrum (g) of the ring-down, same panels: just the spectrum
+                          of x, y, z, with S1..S4 overlaid. Taken from the flick until the fitted ring-downs
+                          reach the noise floor (--fft-window T to set it), rectangular window, linear
+                          amplitude (--fft-yscale log), frequency axis linear from 0 to --fmax.
+  4. <stem>_modes.png     mode shapes: the normalized amplitude of the identified modes along the span
                           (r/R = 0.13, 0.26, 0.35, 0.48), one panel per sensor axis. Always uses all four
                           sensors, whatever --sensor is.
 
@@ -19,10 +23,17 @@ Usage (from scripts/aquire_data):
     python ring_down_analysis.py Data/Modal/DTU10MW_still_air --label flap            # first kept trial
     python ring_down_analysis.py Data/Modal/DTU10MW_still_air --label flap --trial 3
     python ring_down_analysis.py Data/Modal/DTU10MW_still_air/ring_flap_003.csv
-    python ring_down_analysis.py <folder> --label edge --sensor S4                   # one accelerometer
+    python ring_down_analysis.py <folder> --label edge --sensor 4                    # one accelerometer
+    python ring_down_analysis.py <folder> --label flap --component y                 # one sensor axis
+    python ring_down_analysis.py <folder> --label flap --sensor 2 4 --component y z
     python ring_down_analysis.py <folder> --label flap --fmin 10 --fmax 300 --nmodes 4
 
 The first argument is the ring-down folder (then --label / --trial pick the file) or the ring_*.csv file.
+
+--sensor (1-4, or S1-S4, several allowed) and --component (x y z, several allowed) restrict what figures 1-3
+show, and the file names say so: _4 / _24 (the sensor numbers) is appended when fewer than four sensors are shown, and _y / _yz
+when fewer than three axes are shown (e.g. ring_flap_001_psd_4_y.png). --component also decides which axes
+are used for the flick detection and for finding the modes, and which panels the mode-shape figure shows.
 
 Accelerometer processing: identical to the sweep pipeline. The CSV time column is stamped once per FIFO
 batch, so utils/run_loader.load_accel_csv reconstructs a time for every sample, and the data are then
@@ -31,9 +42,11 @@ fits. Stretches where the reconstructed sample spacing is more than 3x nominal (
 reads) are counted and reported. The static (gravity) part is removed with the median of the quiet
 pre-flick record.
 
-Flick detection: the same rule as the quick QC in ring_down_aquire.py: deviation from the median over all
-12 axes, 0.1 s windowed rms, and the flick is the first window above 6x the quiet noise level (the 10th
-percentile of the window rms). --onset T overrides it.
+Flick detection: like the quick QC in ring_down_aquire.py, but the noise level and the static offset come
+from the first --quiet-s seconds of the record (default 1 s; the acquisition script asks for ~2 s of stillness
+before the flick). The deviation over the selected axes (all 12 by default) is windowed (0.1 s rms) and the
+flick is the end of the first window above 6x the quiet noise level, so the window already contains the flick.
+--onset T overrides it.
 
 Damping ratio (per sensor and axis)
     * f_n of an axis = the highest peak of the summed ring-down PSD of the four sensors on that axis, within
@@ -81,9 +94,9 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from utils.run_loader import load_accel_csv                       # noqa: E402
-from plot_angle_sweep import INK, MUTED, SURFACE, CAT, SENSOR_COLORS, fs, style_axes, parse_sensors   # noqa: E402
+from plot_angle_sweep import INK, MUTED, SURFACE, CAT, SENSOR_COLORS, style_axes, parse_sensors   # noqa: E402
 
-NS = 4 #number of sensors (S1..S4)
+NS = 4
 AXES = "xyz"
 R_OVER_R = (0.13, 0.26, 0.35, 0.48)       # spanwise position of S1..S4 (R = 28 cm)
 INT16_MAX = 32767
@@ -178,37 +191,21 @@ def load_trial(path, fs_override, meta):
 # Flick detection
 # --------------------------------------------------
 
-def detect_flick(t, D, fs, component, quiet_s):
-    """Onset time (s) of the flick, or None. Same rule as qc_trial in ring_down_aquire.py."""
-    #add something for if -x,y,z then if only looks at the column that is picked. 
-    if component == ["x"]:
-        D = D[:,:,0]
-    elif component == ["y"]:
-        D = D[:,:,1]
-    elif component == ["z"]:
-        D = D[:,:,2]
-    elif component == ["all"]:
-        D = D
-    else:
-        D=D
+def detect_flick(t, D, fs, comps=(0, 1, 2), quiet_s=1.0):
+    """Onset time (s) of the flick, or None. comps: axis indices (0, 1, 2 = x, y, z) used for detection.
+    The noise level and the static (gravity) offset come from the first quiet_s seconds of the record."""
+    flat = D[:, :, list(comps)].reshape(len(D), -1)
     nq = int(quiet_s * fs)
-    flat = D.reshape(len(D), -1)
-    mag = np.linalg.norm(flat - np.median(flat, axis=0), axis=1) #why is it subtracting the median?
-    w = max(1, int(ONSET_WIN_S * fs)) #create window size based on sample rate and window size.
+    flat = flat - np.median(flat[:nq], axis=0)         # remove gravity / static offset using the quiet start
+    mag = np.linalg.norm(flat, axis=1)
+    w = max(1, int(ONSET_WIN_S * fs))                  # window length in samples
     rms = np.sqrt(np.convolve(mag ** 2, np.ones(w) / w, mode="valid"))
-    nq = int(quiet_s * fs)
-    noise = float(np.median(rms[:max(1, nq - w)])) 
+    noise = float(np.median(rms[:max(1, nq - w)]))     # windows lying entirely inside the quiet start
     above = np.where(rms > ONSET_SNR * noise)[0]
     if noise <= 0 or len(above) == 0:
         return None
-    return float(t[above[0]+w-1]) #edited to make sure it is well after the flick.
+    return float(t[above[0] + w - 1])                  # end of the first window that contains the flick
 
-# --------------------------------------------
-# adding a component detection
-#-----------------------------------------------
-
-#def comp_tag(args):
-# #  return f"S{args.sensor_id}" + ("" if args.component == "mag" else f"_{args.component}")
 
 # --------------------------------------------------
 # Spectra, modes
@@ -332,9 +329,15 @@ def sensor_label(s, fit):
     return f"S{s}   ζ n/a  ({fit['status']})"
 
 
-def plot_signals(t, D, sensors, onset, fits, fn_axis, title, args, out_png):
-    fig, axes = plt.subplots(3, 1, figsize=(11, 9.2), sharex=True, facecolor=SURFACE, constrained_layout=True)
-    for j, ax in enumerate(axes):
+def make_axes(n):
+    fig, axes = plt.subplots(n, 1, figsize=(11, 1.9 + 2.45 * n), sharex=True, facecolor=SURFACE,
+                             constrained_layout=True, squeeze=False)
+    return fig, list(axes[:, 0])
+
+
+def plot_signals(t, D, sensors, comps, onset, fits, fn_axis, title, args, out_png):
+    fig, axes = make_axes(len(comps))
+    for j, ax in zip(comps, axes):
         for s in sensors:
             i = s - 1
             fit = fits[(i, j)]
@@ -358,33 +361,41 @@ def plot_signals(t, D, sensors, onset, fits, fn_axis, title, args, out_png):
     save(fig, out_png, args.dpi)
 
 
-def plot_psd(f, P, fn_f, Pn, sensors, modes, fn_axis, title, args, fs, out_png):
-    fig, axes = plt.subplots(3, 1, figsize=(11, 9.2), sharex=True, facecolor=SURFACE, constrained_layout=True)
+def mode_lines(ax, modes):
+    for k, fk in enumerate(modes):
+        ax.axvline(fk, color=INK, lw=0.8, ls=":", alpha=0.6, zorder=1)
+        ax.text(fk, 1.0, str(k + 1), transform=ax.get_xaxis_transform(), ha="center", va="bottom",
+                fontsize=8, color=INK)
+
+
+def mode_legend_handle(modes):
+    return Line2D([], [], color=INK, lw=0.9, ls=":",
+                  label="modes: " + ", ".join(f"{k + 1}: {fk:.1f} Hz" for k, fk in enumerate(modes)))
+
+
+def plot_psd(f, P, fn_f, Pn, sensors, comps, modes, fn_axis, title, args, fs, out_png):
+    fig, axes = make_axes(len(comps))
     pos = f > 0
-    for j, ax in enumerate(axes):
+    for j, ax in zip(comps, axes):
         for s in sensors:
             i = s - 1
             if Pn is not None:
                 pn = fn_f > 0
                 ax.plot(fn_f[pn], Pn[pn, i, j], color=GREY, lw=0.9, ls=(0, (3, 2)), zorder=2)
             ax.plot(f[pos], P[pos, i, j], color=SENSOR_COLORS[i], lw=1.0, label=f"S{s}", zorder=3)
-        for k, fk in enumerate(modes):
-            ax.axvline(fk, color=INK, lw=0.8, ls=":", alpha=0.6, zorder=1)
-            ax.text(fk, 1.0, str(k + 1), transform=ax.get_xaxis_transform(), ha="center", va="bottom",
-                    fontsize=8, color=INK)
+        mode_lines(ax, modes)
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_ylabel("PSD (g$^2$/Hz)", color=INK)
         ax.set_title(f"sensor {AXES[j]} axis   ·   dominant peak {fn_axis[j]:.1f} Hz", loc="left", fontsize=10,
-                     color=INK)
+                     color=INK, pad=12)
         style_axes(ax)
         ax.grid(True, which="minor", color="#efeeea", linewidth=0.5, zorder=0)
     handles = [Line2D([], [], color=SENSOR_COLORS[s - 1], lw=1.6, label=f"S{s}") for s in sensors]
     if Pn is not None:
         handles.append(Line2D([], [], color=GREY, lw=1.2, ls=(0, (3, 2)), label="pre-flick noise"))
     if len(modes):
-        handles.append(Line2D([], [], color=INK, lw=0.9, ls=":",
-                              label="modes: " + ", ".join(f"{k + 1}: {fk:.1f} Hz" for k, fk in enumerate(modes))))
+        handles.append(mode_legend_handle(modes))
     axes[0].legend(handles=handles, loc="lower left", ncol=2, frameon=False, fontsize=9, labelcolor=INK)
     axes[-1].set_xlabel("Frequency (Hz)", color=INK)
     axes[-1].set_xlim(max(1.0, args.fmin / 3), fs / 2)
@@ -393,7 +404,49 @@ def plot_psd(f, P, fn_f, Pn, sensors, modes, fn_axis, title, args, fs, out_png):
     save(fig, out_png, args.dpi)
 
 
-def plot_modes(shape, coh, modes, title, args, out_png):
+def amplitude_spectrum(x, fs):
+    """Single-sided FFT amplitude (g) of x (N, ...), mean removed, rectangular window (a taper would suppress
+    the ring-down, which sits at the start of the window), zero-padded to at least 4 s for a smooth curve. A
+    steady sinusoid of amplitude A gives a peak of height A; a decaying one gives less, the longer the window
+    the lower the peak."""
+    n = len(x)
+    nfft = int(2 ** np.ceil(np.log2(max(n, 4 * fs))))
+    X = np.fft.rfft(x - x.mean(axis=0), n=nfft, axis=0)
+    return np.fft.rfftfreq(nfft, 1.0 / fs), 2.0 * np.abs(X) / n
+
+
+def plot_fft(f, A, sensors, comps, modes, fn_axis, title, args, fs, out_png):
+    fig, axes = make_axes(len(comps))
+    fmax = min(args.fmax, fs / 2)
+    idx = [s - 1 for s in sensors]
+    band = (f >= max(args.fmin / 3, f[1])) & (f <= fmax)
+    for j, ax in zip(comps, axes):
+        for s in sensors:
+            ax.plot(f, A[:, s - 1, j], color=SENSOR_COLORS[s - 1], lw=0.9, label=f"S{s}", zorder=3)
+        mode_lines(ax, modes)
+        ax.set_xlim(0, fmax)
+        if args.fft_yscale == "log":
+            ax.set_yscale("log")
+            vals = A[band][:, idx, j]
+            vals = vals[vals > 0]
+            if vals.size:
+                ax.set_ylim(vals.min() / 2, vals.max() * 3)
+        else:
+            ax.set_ylim(bottom=0)
+        ax.set_ylabel("FFT amplitude (g)", color=INK)
+        ax.set_title(f"sensor {AXES[j]} axis   ·   dominant peak {fn_axis[j]:.1f} Hz", loc="left", fontsize=10,
+                     color=INK, pad=12)
+        style_axes(ax)
+    handles = [Line2D([], [], color=SENSOR_COLORS[s - 1], lw=1.6, label=f"S{s}") for s in sensors]
+    if len(modes):
+        handles.append(mode_legend_handle(modes))
+    axes[0].legend(handles=handles, loc="upper right", ncol=2, frameon=False, fontsize=9, labelcolor=INK)
+    axes[-1].set_xlabel("Frequency (Hz)", color=INK)
+    fig.suptitle(title + "      FFT amplitude spectrum of the ring-down", x=0.01, ha="left", fontsize=11, color=INK)
+    save(fig, out_png, args.dpi)
+
+
+def plot_modes(shape, coh, modes, comps, title, args, out_png):
     K = len(modes)
     if args.mode_norm == "mode":
         scale = np.abs(shape).reshape(K, -1).max(axis=1)[:, None, None] * np.ones((K, 3, 1))
@@ -401,10 +454,13 @@ def plot_modes(shape, coh, modes, title, args, out_png):
         scale = np.abs(shape).max(axis=2, keepdims=True)
     norm = shape / np.where(scale > 0, scale, 1.0)
 
-    fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.9), sharey=True, facecolor=SURFACE, constrained_layout=True)
+    n = len(comps)
+    fig, axes = plt.subplots(1, n, figsize=(4.5 * n + 0.5, 4.9), sharey=True, facecolor=SURFACE,
+                             constrained_layout=True, squeeze=False)
+    axes = list(axes[0])
     xs = np.array([0.0] + list(R_OVER_R))
     xx = np.linspace(0, xs[-1], 120)
-    for j, ax in enumerate(axes):
+    for j, ax in zip(comps, axes):
         ax.axhline(0, color=MUTED, lw=0.7, alpha=0.6, ls=(0, (4, 3)))
         for k, fk in enumerate(modes):
             col = CAT[k % len(CAT)]
@@ -442,7 +498,13 @@ def main():
     ap.add_argument("trial", help="ring-down folder (with --label, --trial) or one ring_<label>_<NNN>.csv file")
     ap.add_argument("--label", help="excitation label of the trial (e.g. flap, edge); needed if several exist")
     ap.add_argument("--trial-number", "--trial", dest="k", type=int, help="trial number (default: the first kept)")
-    ap.add_argument("--sensor", nargs="+", help="accelerometer(s) for figures 1 and 2, e.g. S4 or S1 S4 (default all)")
+    ap.add_argument("--sensor", nargs="+",
+                    help="accelerometer(s) for figures 1-3: 4, S4 or 1 4 (default all four); added to the file names")
+    ap.add_argument("--component", nargs="+", choices=list(AXES),
+                    help="sensor axis/axes to show and use, e.g. y or x z (default x y z); added to the file names")
+    ap.add_argument("--quiet-s", type=float, default=1.0,
+                    help="seconds at the start of the record that are quiet: noise level and static offset for "
+                         "the flick detection (default 1)")
     ap.add_argument("--onset", type=float, help="flick time (s) if the automatic detection is wrong")
     ap.add_argument("--fmin", type=float, default=5.0, help="lowest frequency searched for peaks (Hz, default 5)")
     ap.add_argument("--fmax", type=float, default=400.0, help="highest frequency searched for peaks (Hz, default 400)")
@@ -452,6 +514,10 @@ def main():
     ap.add_argument("--fit-snr", type=float, default=3.0,
                     help="stop the decay fit when the envelope falls below this x the noise level (default 3)")
     ap.add_argument("--nperseg", type=int, default=2048, help="Welch segment length (default 2048)")
+    ap.add_argument("--fft-window", type=float,
+                    help="seconds after the flick to include in the FFT figure (default: until the fitted "
+                         "ring-downs reach the noise floor)")
+    ap.add_argument("--fft-yscale", choices=["log", "linear"], default="linear", help="FFT amplitude axis (default linear)")
     ap.add_argument("--nmodes", type=int, default=3, help="number of modes for the mode-shape figure (default 3)")
     ap.add_argument("--min-sep", type=float, default=3.0, help="minimum spacing of modes (Hz, default 3)")
     ap.add_argument("--mode-norm", choices=["mode", "axis"], default="mode",
@@ -460,13 +526,14 @@ def main():
     ap.add_argument("--fs", type=float, help="override the sample rate (Hz); default is the ODR from the CSV header")
     ap.add_argument("--out", help="output folder (default <folder>/analysis)")
     ap.add_argument("--dpi", type=int, default=200)
-    ap.add_argument("--component", nargs="+", choices=["all","x", "y", "z"], default=["z"], help = "which components to analyze (default z)")
-    ap.add_argument("--quiet-s", type=float, default=1.0, help="seconds at the start of the record that are quiet (noise level, static offset)")
     args = ap.parse_args()
 
     run_dir, path = find_trial(args.trial, args.label, args.k)
     meta = read_meta(run_dir)
     sensors = parse_sensors(args.sensor)
+    comps = [j for j, a in enumerate(AXES) if args.component is None or a in args.component]
+    tag_s = "" if len(sensors) == NS else "_" + "".join(str(s) for s in sensors)
+    tag_c = "" if len(comps) == 3 else "_" + "".join(AXES[j] for j in comps)
     print(f"Trial: {path}")
     t, D, info = load_trial(path, args.fs, meta)
     fs = info["fs"]
@@ -484,7 +551,7 @@ def main():
             print(f"  WARN: S{s + 1} {', '.join(bad)} at full scale for >= 1% of samples; use a higher --fs range "
                   "(clipped peaks bias the damping and mode shapes)")
 
-    onset = args.onset if args.onset is not None else detect_flick(t, D, fs, args.component, args.quiet_s)
+    onset = args.onset if args.onset is not None else detect_flick(t, D, fs, comps, args.quiet_s)
     if onset is None:
         raise SystemExit("No flick detected (the signal never rose above the noise floor); give --onset T")
     print(f"  Flick at {onset:.3f} s{' (manual)' if args.onset is not None else ''}")
@@ -526,8 +593,8 @@ def main():
     print("\n  Damping (exponential fit of the ring-down envelope):")
     print("    sensor axis   f_n (Hz)   zeta      sigma (1/s)  R^2    cycles  peak/noise  note")
     rows = []
-    for i in range(NS):
-        for j in range(3):
+    for i in [s - 1 for s in sensors]:
+        for j in comps:
             q = fits[(i, j)]
             note = "" if q["status"] == "ok" else q["status"]
             print(f"    S{i + 1}     {AXES[j]}    {q['fn']:8.2f}   {q['zeta']:.4f}   {q['sigma']:9.3f}   "
@@ -535,7 +602,7 @@ def main():
             rows.append(dict(sensor=f"S{i + 1}", axis=AXES[j], **{k: v for k, v in q.items() if k != "intercept"}))
 
     # modes and mode shapes (always all four sensors)
-    modes = find_modes(f, P.sum(axis=(1, 2)), args.fmin, args.fmax, args.nmodes, args.min_sep)
+    modes = find_modes(f, P[:, :, comps].sum(axis=(1, 2)), args.fmin, args.fmax, args.nmodes, args.min_sep)
     if len(modes):
         print("\n  Modes: " + ", ".join(f"{k + 1}: {fk:.1f} Hz" for k, fk in enumerate(modes)))
     else:
@@ -545,18 +612,32 @@ def main():
     stem = path.stem
     bits = [stem, f"flick at {onset:.2f} s", f"{fs:g} Hz"]
     title = "   ·   ".join(bits)
+    tag = tag_s + tag_c                                  # figures 1-3 depend on both choices
 
-    sig_png = out_dir / f"{stem}_signals.png"
-    plot_signals(t, D, sensors, onset, fits, fn_axis, title, args, sig_png)
-    psd_png = out_dir / f"{stem}_psd.png"
-    plot_psd(f, P, fn_f, Pn, sensors, modes, fn_axis, title, args, fs, psd_png)
-    print(f"\nWrote {sig_png}\n      {psd_png}")
-    pd.DataFrame(rows).to_csv(out_dir / f"{stem}_damping.csv", index=False)
+    sig_png = out_dir / f"{stem}_signals{tag}.png"
+    plot_signals(t, D, sensors, comps, onset, fits, fn_axis, title, args, sig_png)
+    psd_png = out_dir / f"{stem}_psd{tag}.png"
+    plot_psd(f, P, fn_f, Pn, sensors, comps, modes, fn_axis, title, args, fs, psd_png)
+    if args.fft_window:
+        t_stop = onset + args.fft_window
+    else:                                       # until the selected ring-downs reached the noise floor
+        ends = [fits[(s - 1, j)]["t_end"] for s in sensors for j in comps if np.isfinite(fits[(s - 1, j)]["t_end"])]
+        t_stop = max(ends) if ends else t[-1]
+    fm = post & (t <= t_stop)
+    print(f"  FFT window: {onset:.2f} to {min(t_stop, t[-1]):.2f} s ({fm.sum() / fs:.2f} s)")
+    f_fft, A = amplitude_spectrum(D[fm], fs)
+    fft_png = out_dir / f"{stem}_fft{tag}.png"
+    plot_fft(f_fft, A, sensors, comps, modes, fn_axis, title, args, fs, fft_png)
+    print(f"\nWrote {sig_png}\n      {psd_png}\n      {fft_png}")
+    damp_csv = out_dir / f"{stem}_damping{tag}.csv"
+    pd.DataFrame(rows).to_csv(damp_csv, index=False)
 
+    modes_csv = None
     if len(modes):
         shape, coh, phase, ref = mode_shapes(D[post], Pn_interp, f, fs, args.nperseg, modes)
-        mode_png = out_dir / f"{stem}_modes.png"
-        norm = plot_modes(shape, coh, modes, title + f"      mode shapes ({args.mode_norm}-normalized)", args, mode_png)
+        mode_png = out_dir / f"{stem}_modes{tag_c}.png"
+        norm = plot_modes(shape, coh, modes, comps, title + f"      mode shapes ({args.mode_norm}-normalized)", args,
+                          mode_png)
         print(f"      {mode_png}")
         mrows = []
         for k, fk in enumerate(modes):
@@ -564,7 +645,7 @@ def main():
             part = pw / pw.sum() if pw.sum() > 0 else pw
             print(f"\n  Mode {k + 1}  {fk:.1f} Hz   share of power: "
                   + "  ".join(f"{AXES[j]} {100 * part[j]:.0f}%" for j in range(3)))
-            for j in range(3):
+            for j in comps:
                 print(f"    {AXES[j]}: " + "  ".join(f"S{i + 1} {norm[k, j, i]:+.2f}" for i in range(NS))
                       + f"   (ref S{ref[k, j] + 1}, min coherence {coh[k, j].min():.2f})")
                 for i in range(NS):
@@ -572,9 +653,9 @@ def main():
                                       r_over_R=R_OVER_R[i], shape_normalized=norm[k, j, i],
                                       shape_signed_g=shape[k, j, i], coherence=coh[k, j, i],
                                       phase_deg=phase[k, j, i], axis_power_share=part[j]))
-        pd.DataFrame(mrows).to_csv(out_dir / f"{stem}_modes.csv", index=False)
-    print(f"\nTables: {out_dir / (stem + '_damping.csv')}" + (f", {out_dir / (stem + '_modes.csv')}" if len(modes) else ""))
-
+        modes_csv = out_dir / f"{stem}_modes{tag_c}.csv"
+        pd.DataFrame(mrows).to_csv(modes_csv, index=False)
+    print(f"\nTables: {damp_csv}" + (f", {modes_csv}" if modes_csv else ""))
 
 if __name__ == "__main__":
     main()
