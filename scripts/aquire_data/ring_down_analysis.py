@@ -46,7 +46,9 @@ Flick detection: like the quick QC in ring_down_aquire.py, but the noise level a
 from the first --quiet-s seconds of the record (default 1 s; the acquisition script asks for ~2 s of stillness
 before the flick). The deviation over the selected axes (all 12 by default) is windowed (0.1 s rms) and the
 flick is the end of the first window above 6x the quiet noise level, so the window already contains the flick.
+
 --onset T overrides it.
+--flick_t overrides the length of the flick in seconds (default 0.5 s) for the PSD and mode shape calculations. 
 
 Damping ratio (per sensor and axis)
     * f_n of an axis = the highest peak of the summed ring-down PSD of the four sensors on that axis, within
@@ -335,18 +337,18 @@ def make_axes(n):
     return fig, list(axes[:, 0])
 
 
-def plot_signals(t, D, sensors, comps, onset, fits, fn_axis, title, args, out_png):
+def plot_signals(t, D, sensors, comps, onset, fits, fn_axis, title, args, out_png, t_flick):
     fig, axes = make_axes(len(comps))
     for j, ax in zip(comps, axes):
         for s in sensors:
             i = s - 1
             fit = fits[(i, j)]
-            ax.plot(t, D[:, i, j], color=SENSOR_COLORS[i], lw=0.7, label=sensor_label(s, fit), zorder=3)
-            if np.isfinite(fit["zeta"]):
-                m = (t >= fit["t_peak"]) & (t <= fit["t_end"])
-                e = np.exp(fit["intercept"] - fit["sigma"] * t[m])
-                ax.plot(t[m], e, color=SENSOR_COLORS[i], lw=1.2, ls=(0, (4, 2)), zorder=4)
-                ax.plot(t[m], -e, color=SENSOR_COLORS[i], lw=1.2, ls=(0, (4, 2)), zorder=4)
+            ax.plot(t, D[:, i, j], color=SENSOR_COLORS[i], lw=0.7, label=sensor_label(s, fit), zorder=3, ls ='none', marker = '.', markersize = 2)
+            #if np.isfinite(fit["zeta"]):
+            #    m = (t >= fit["t_peak"]) & (t <= fit["t_end"])
+            #    e = np.exp(fit["intercept"] - fit["sigma"] * t[m])
+            #    ax.plot(t[m], e, color=SENSOR_COLORS[i], lw=1.2, ls=(0, (4, 2)), zorder=4)
+            #    ax.plot(t[m], -e, color=SENSOR_COLORS[i], lw=1.2, ls=(0, (4, 2)), zorder=4)
         ax.axvline(onset, color=MUTED, lw=1.0, ls=(0, (2, 2)), zorder=2)
         ax.axhline(0, color=MUTED, lw=0.5, alpha=0.5)
         ax.set_ylabel("Acceleration (g)", color=INK)
@@ -356,7 +358,8 @@ def plot_signals(t, D, sensors, comps, onset, fits, fn_axis, title, args, out_pn
     axes[0].annotate("flick", (onset, 1.0), xycoords=("data", "axes fraction"), xytext=(4, -12),
                      textcoords="offset points", fontsize=8.5, color=MUTED)
     axes[-1].set_xlabel("Time (s)", color=INK)
-    axes[-1].set_xlim(t[0], args.tmax if args.tmax else t[-1])
+    axes[-1].set_xlim(t_flick, args.tmax if args.tmax else t[-1])
+    #axes[-1].set_xlim(t[0], args.tmax if args.tmax else t[-1])
     fig.suptitle(title + "      dashed = fitted decay envelope", x=0.01, ha="left", fontsize=11, color=INK)
     save(fig, out_png, args.dpi)
 
@@ -526,6 +529,7 @@ def main():
     ap.add_argument("--fs", type=float, help="override the sample rate (Hz); default is the ODR from the CSV header")
     ap.add_argument("--out", help="output folder (default <folder>/analysis)")
     ap.add_argument("--dpi", type=int, default=200)
+    ap.add_argument("--flick_t", type = float, default = 0.5, help = "time of flick in seconds")
     args = ap.parse_args()
 
     run_dir, path = find_trial(args.trial, args.label, args.k)
@@ -562,10 +566,10 @@ def main():
     if pre.sum() < int(0.3 * fs):
         print("  NOTE: less than 0.3 s of quiet before the flick; baseline and noise floor use the whole record")
     D = D - base
-    post = t >= onset
-
+    post = t >= onset #boolean mask the same dimension as t, True for samples after the flick onset
     # spectra of the ring-down, and the pre-flick noise floor
-    f, P = psd(D[post], fs, args.nperseg)
+    flick_length = args.flick_t if args.flick_t is not None else 0.5
+    f, P = psd(D[post][:int(flick_length * fs)], fs, args.nperseg) #saves the frequency and the power spectral density of the post-flick data
     Pn, fn_f = None, None
     if pre.sum() >= 256:
         # shorter segments than the ring-down PSD: the quiet record is short, and more averages give a
@@ -615,7 +619,7 @@ def main():
     tag = tag_s + tag_c                                  # figures 1-3 depend on both choices
 
     sig_png = out_dir / f"{stem}_signals{tag}.png"
-    plot_signals(t, D, sensors, comps, onset, fits, fn_axis, title, args, sig_png)
+    plot_signals(t, D, sensors, comps, onset, fits, fn_axis, title, args, sig_png, onset)
     psd_png = out_dir / f"{stem}_psd{tag}.png"
     plot_psd(f, P, fn_f, Pn, sensors, comps, modes, fn_axis, title, args, fs, psd_png)
     if args.fft_window:
@@ -634,7 +638,7 @@ def main():
 
     modes_csv = None
     if len(modes):
-        shape, coh, phase, ref = mode_shapes(D[post], Pn_interp, f, fs, args.nperseg, modes)
+        shape, coh, phase, ref = mode_shapes(D[post][:int(flick_length * fs)], Pn_interp, f, fs, args.nperseg, modes)
         mode_png = out_dir / f"{stem}_modes{tag_c}.png"
         norm = plot_modes(shape, coh, modes, comps, title + f"      mode shapes ({args.mode_norm}-normalized)", args,
                           mode_png)
