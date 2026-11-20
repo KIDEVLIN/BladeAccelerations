@@ -9,11 +9,11 @@ the regions are drawn over it and numbered 1, 2, 3 in order of motor angle.
 
     python plot_regions_inflow.py
     python plot_regions_inflow.py --out ../../data/Production_summaries/figures
-    python plot_regions_inflow.py --regions 120 170 210 --halfwidth 15 --sweep 30 --mounting 5
+    python plot_regions_inflow.py --regions 120 170 210 --halfwidth 15 --sweep -30 --mounting 84.105
 
-Defaults follow tests/map_angles.py: sweep +30 deg and mounting angle (AoA at motor 0 deg, the convention of
-coordinate_transforms) 5 deg. run_metadata.json records sweep -30 and mounting 84.105 deg in a different
-convention; taken at face value they mirror the inclination and put motor 0 deg at AoA 84 deg. AoA runs from
+Defaults are the production geometry recorded in run_metadata.json: sweep -30 deg (blade tip toward the
+shaft) and mounting angle 84.105 deg (chord to arm, i.e. AoA +5.895 deg at motor 0), in the conventions of
+coordinate_transforms (fixed 12 Nov 2026; see reports/angle_check/). AoA runs from
 -180 to 180 deg, so a region through reversed flow is drawn in two pieces, at the top and bottom. Writes
 regions_inflow_aoa.png and a CSV with each region's motor, inclination and AoA ranges.
 """
@@ -73,9 +73,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--regions", nargs="+", type=float, default=[float(r) for r in DEFAULT_REGIONS])
     ap.add_argument("--halfwidth", type=float, default=DEFAULT_HALFWIDTH_DEG)
-    ap.add_argument("--sweep", type=float, default=30.0, help="default +30, as in tests/map_angles.py")
-    ap.add_argument("--mounting", type=float, default=5.0, help="AoA at motor 0 deg (default 5, as in "
-                                                                 "tests/map_angles.py)")
+    ap.add_argument("--sweep", type=float, default=-30.0, help="sweep angle (deg); production -30")
+    ap.add_argument("--mounting", type=float, default=84.105,
+                    help="angle between chord and arm (deg); production 84.105 = 90 - 5.895")
     ap.add_argument("--out", default=str(Path(__file__).resolve().parents[2] / "data" / "Production_summaries"
                                          / "figures"))
     ap.add_argument("--dpi", type=int, default=200)

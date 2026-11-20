@@ -115,14 +115,22 @@ ACCEL_SAT_WARN_FRACTION = 0.01
 SAMPLE_DURATION_S = 60         # how long to capture accel + load data at each angle
 SETTLE_TIME_S = 2             # pause after move, before capture starts
 
-# Coordinate-frame constants (see utils/coordinate_transforms.py).
-# These describe the fixed physical setup for this run (as opposed to
-# motor_angle, which is swept from ANGLES_FILE) -- set them here before
-# starting a run.
-#   SWEEP_ANGLE_DEG:    blade azimuthal/sweep orientation for this run
-#   MOUNTING_ANGLE_DEG: fixed blade mounting angle for this run
+# Coordinate-frame constants (see utils/coordinate_transforms.py for the
+# conventions, reports/angle_check/ for the checks). These describe the fixed
+# physical setup for this run (as opposed to motor_angle, which is swept from
+# ANGLES_FILE) -- set them here before starting a run.
+#   SWEEP_ANGLE_DEG:    lean of the blade from vertical in the plane of the
+#                       arm; negative = blade tip leaning back toward the shaft.
+#   CHORD_OFFSET_DEG:   angle of the chord from perpendicular to the arm, which
+#                       is the angle of attack at motor angle 0. 5.895 deg was
+#                       set on 29 Sep 2026 (commits 3123b12, c54c5aa) with the
+#                       experimentalists' sketch of the rig.
+#   MOUNTING_ANGLE_DEG: angle between chord and arm (90 = perpendicular), the
+#                       input coordinate_transforms expects; stored in the run
+#                       metadata.
 SWEEP_ANGLE_DEG = -30.0
-MOUNTING_ANGLE_DEG = -5.895+90
+CHORD_OFFSET_DEG = 5.895
+MOUNTING_ANGLE_DEG = 90.0 - CHORD_OFFSET_DEG
 
 SETTLE_TOLERANCE_DEG = 0.1
 SETTLE_TIMEOUT_S = 30
@@ -515,6 +523,7 @@ def main(fs=ACCEL_FS, odr_hz=ACCEL_ODR_HZ):
         "start_time": datetime.now().isoformat(timespec="seconds"),
         "sweep_angle_deg": SWEEP_ANGLE_DEG,
         "mounting_angle_deg": MOUNTING_ANGLE_DEG,
+        "chord_offset_deg": CHORD_OFFSET_DEG,
         "airfoil_chord_m": AIRFOIL_CHORD_M,
         "blade_chord_avg_m": BLADE_CHORD_AVG_M,
         "blade_span_m": BLADE_SPAN_M,

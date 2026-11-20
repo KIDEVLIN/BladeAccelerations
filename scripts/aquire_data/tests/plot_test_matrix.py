@@ -2,8 +2,9 @@
 plot_test_matrix.py
 
 Scatter plot of angle of attack vs inclination angle across the test
-matrix: mounting angle 0 deg, sweep angle 30 deg, and motor angles from
--180 to 180 deg, colored by motor angle.
+matrix of the production runs: mounting angle 84.105 deg (chord to arm),
+sweep angle -30 deg, and motor angles from -180 to 180 deg, colored by
+motor angle.
 
 Run from the repo root with:
     python3 scripts/aquire_data/tests/plot_test_matrix.py
@@ -23,8 +24,8 @@ from utils import coordinate_transforms as ct  # noqa: E402
 # Test matrix
 # --------------------------------------------------
 
-MOUNTING_ANGLE_DEG = 0.0
-SWEEP_ANGLE_DEG = 30.0
+MOUNTING_ANGLE_DEG = 84.105   # angle between chord and arm (90 = perpendicular)
+SWEEP_ANGLE_DEG = -30.0       # production runs: blade tip leaning toward the shaft
 MOTOR_ANGLES_DEG = np.arange(-180, 181, 10)
 
 FIG_DIR = Path(__file__).resolve().parent / "figs"
