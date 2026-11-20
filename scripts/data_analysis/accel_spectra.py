@@ -143,19 +143,26 @@ def top_peaks(f, p, n=None, fmin=PEAK_FMIN_HZ, smooth_hz=PEAK_SMOOTH_HZ,
     return sorted(idx, key=lambda i: p[i], reverse=True)[:n]
 
 
-def drop_sidebands(f, p, idx, f_batch, n_max=3, tol_hz=None):
+def drop_sidebands(f, p, idx, f_batch, n_max=3, tol_hz=None, max_ratio=0.2):
     """Removes from `idx` every peak within tol_hz of (a stronger kept
-    peak) +/- k * f_batch, k = 1..n_max: the batch-gap copies of a mode.
-    The default tolerance, 20% of f_batch (~3 Hz), allows for peak
-    positions wandering by a few bins on single captures; a real mode
-    that close to a copy position is dropped too. Returns the kept
-    indices, highest first."""
+    peak) +/- k * f_batch, k = 1..n_max, AND weaker than max_ratio times
+    that peak: the batch-gap copies of a mode. The default tolerance, 20%
+    of f_batch (~3 Hz), allows for peak positions wandering by a few bins
+    on single captures.
+
+    The ratio test keeps real modes that happen to sit at a copy position.
+    The 84-on / 16-off read pattern puts each copy at ~3% of its parent's
+    PSD (|sinc|^2 of the duty cycle; 2-5% measured on the 62 Hz ring-down
+    mode), so a peak above 20% of its parent cannot be a copy of it. Without
+    this test the bolted 146 Hz edge mode (75% of the 117 Hz peak, 37% of
+    the 162 Hz one) was dropped. Returns the kept indices, highest first."""
     if tol_hz is None:
         tol_hz = max(2 * (f[1] - f[0]), 0.2 * f_batch)
     kept = []
     for i in sorted(idx, key=lambda i: p[i], reverse=True):
-        copies = [f[j] + s * k * f_batch for j in kept
-                  for k in range(1, n_max + 1) for s in (-1, 1)]
-        if not np.isfinite(f_batch) or all(abs(f[i] - c) > tol_hz for c in copies):
+        is_copy = np.isfinite(f_batch) and any(
+            abs(f[i] - (f[j] + s * k * f_batch)) <= tol_hz and p[i] < max_ratio * p[j]
+            for j in kept for k in range(1, n_max + 1) for s in (-1, 1))
+        if not is_copy:
             kept.append(i)
     return kept
