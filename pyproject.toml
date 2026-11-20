@@ -1,0 +1,16 @@
+[project]
+name = "blade-accelerations"
+version = "0.1.0"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "nidaqmx",
+    "pyserial>=3.5",
+    "minimalmodbus",
+    "scipy (>=1.18.1,<2.0.0)",
+]
+
+[tool.poetry]
+package-mode = false

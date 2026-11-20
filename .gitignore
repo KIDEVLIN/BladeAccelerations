@@ -25,3 +25,14 @@ Thumbs.db
 Production_summaries/
 scripts/aquire_data/Production_summaries/
 *.npz
+
+# LaTeX build by-products (the PDFs are tracked)
+*.aux
+*.fdb_latexmk
+*.fls
+*.out
+*.synctex.gz
+*.toc
+
+# Generated plot outputs (rebuilt by plot_psd.py; reports keep copies of what they use)
+figures/psd_analysis/
