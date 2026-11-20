@@ -1,0 +1,206 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\emergencystretch=3em
+
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{What the AF10R1 user guide changes in the accelerometer timing analysis}
+\author{Ilan Upfal}
+\date{28 October 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Summary}
+
+This note follows up the report \emph{Accelerometer sample timing: dropped
+samples and biased frequencies} (\code{reports/accel\_sampling}) using the
+vendor's user guide for the accelerometer board (InUnit AB, AF10R1 User Guide,
+DOC-2026-06-12-01 rev v1, draft; \code{data/pcb\_documentation/AF10R1\_UG.pdf}).
+It changes three things.
+
+\begin{enumerate}
+  \item \textbf{The sensors sample at about 1493\,Hz, not 1600\,Hz.} We lose
+        about 16\% of samples, not 22\%. The 62.7\,Hz first flap mode found
+        by the corrected method is unaffected. The corrected higher-mode
+        peaks in that report are not: they move by about 15\,Hz, and the
+        second flap mode now matches the video's 164.5\,Hz.
+  \item \textbf{The board can keep up.} The vendor streamed for 5 minutes with
+        the same 84-set reads and lost no samples. Our read loop is the
+        bottleneck.
+  \item \textbf{Dropped samples are not buffered.} The guide describes a
+        1024-set buffer, which should hold the first $\sim$4\,s of
+        shortfall. Our data show samples missing from the start. The most
+        likely cause is that a read discards the samples it does not return.
+        Logging three registers would confirm it.
+\end{enumerate}
+
+\section{The actual sample rate is about 1493\,Hz}
+
+The LIS2DS12 sensors run on an internal RC oscillator. The guide measured
+1493\,Hz over 5 minutes (stable to $\pm$1\,Hz, all four sensors), 6.7\%
+below the configured 1600\,Hz. Its specification table says 1525\,Hz. The
+previous report assumed exactly 1600\,Hz.
+
+\paragraph{Our data agree.} With the corrected timing (method~3 of the
+previous report: samples on a fixed grid within each batch, gaps masked),
+copies of the first mode appear 14.9\,Hz on either side of it. If the
+assumed rate is too high, the copy above is stronger than the copy below.
+Table~\ref{tab:copies} shows this lopsidedness at 1600\,Hz. The two copies are
+about equal between 1493 and 1525\,Hz, the range the guide gives.
+
+\begin{table}[h]
+  \centering
+  \begin{tabular}{lccccc}
+    \toprule
+    Assumed rate (Hz) & 1475 & 1493 & 1510 & 1525 & 1600 \\
+    \midrule
+    Copy at $f_1 - 14.9$\,Hz & 0.071 & 0.044 & 0.034 & 0.024 & 0.007 \\
+    Copy at $f_1 + 14.9$\,Hz & 0.014 & 0.023 & 0.032 & 0.039 & 0.185 \\
+    First mode $f_1$ (Hz) & 62.5 & 62.5 & 62.5 & 62.5 & 62.5 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Power of the batch-gap copies relative to the first flap mode
+  (median PSD of \code{s4\_z}, 30 flap trials) for different assumed
+  sensor rates.}
+  \label{tab:copies}
+\end{table}
+
+\paragraph{Revised loss numbers.} An 84-sample batch takes 56.3\,ms to
+produce, not 52.5\,ms. In each 67.3\,ms read cycle the sensor produces
+about 100.5 samples, and we keep 84. The delivered rate of 1249\,Hz is 84\%
+of the true rate, so we lose 16\%. The conclusion that samples are dropped
+between batches still holds.
+
+\paragraph{What this means for frequencies.} The batch read times fix which
+frequencies the spectrum can show: the true frequency and its copies
+$\pm n \times 14.9$\,Hz. The assumed rate only decides which of these
+appears strongest. For the first mode the true line wins at every rate from
+1475 to 1600\,Hz, so 62.5\,Hz stands. The two wrong-timing predictions in the
+previous report (47.9 and 61.4\,Hz) also come out the same at 1493\,Hz.
+
+For higher modes, a 7\% error in the rate moves the strongest line by one or
+more copies. Table~\ref{tab:peaks} repeats the higher peaks at the corrected
+rate.
+
+\begin{table}[h]
+  \centering
+  \begin{tabular}{llcc}
+    \toprule
+    Excitation & Channel & Previous report (1600\,Hz) & Assumed 1493--1525\,Hz \\
+    \midrule
+    Flap & \code{s4\_z} & 176--178 & 159.5--162 \quad(video: 164.5) \\
+    Flap & \code{s4\_z} & 275--285 & 260--267 \\
+    Flap & \code{s4\_z} & $\approx$430 & 407--423 \\
+    Edge & \code{s4\_y} & 118--121 & 115.5--116.5 \\
+    Edge & \code{s4\_y} & 313--326 & 297--301 \\
+    Edge & \code{s4\_y} & 577--597 & 534--559 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Higher peaks of the median PSDs. Right column: range of peak
+  locations as the assumed rate varies from 1493 to 1525\,Hz. Previous
+  values are over several sensors; new values are for sensor~4 only.}
+  \label{tab:peaks}
+\end{table}
+
+The spread in the right-hand column is the uncertainty: the higher peaks are
+known only to within about one copy (15\,Hz). They should be quoted as
+approximate until the timing is fixed at acquisition.
+
+\section{The board keeps up; our loop does not}
+
+The guide's verification test used the vendor script \code{test\_modbus.py}
+with the same 84-set maximum read: 448\,517 samples in 300\,s, 0 overruns,
+0 CRC errors. Each batch uses about 22\,ms of the 67\,ms cycle on the serial
+line. The rest is spent in our loop (\code{collect\_accel\_for\_duration} in
+\code{main.py}). This supports the previous report's recommendation to make
+that loop faster.
+
+\section{Dropped samples are not buffered}
+
+The guide describes a 1024-set buffer on the board, and our capture clears
+it before each run. At about 16.5 surplus samples per read, the buffer
+should take about 62 reads ($\approx$4.2\,s) to fill. Until then, no samples
+should be lost: each batch would continue exactly where the previous one
+ended, only later.
+
+We tested this on the 30 flap ringdowns, most of which start between 3.0
+and 4.5\,s. For the 62.7\,Hz mode we measured the phase change from one batch
+to the next:
+
+\begin{center}
+\begin{tabular}{lc}
+  \toprule
+  & Phase change per batch \\
+  \midrule
+  Expected if batches are continuous & $-3.07$\,rad \\
+  Expected if 67\,ms passes between batches & $+1.4$\,rad \\
+  Measured, 2--4\,s (40 batch pairs) & $+1.09$\,rad \\
+  Measured, 4--6\,s (74 batch pairs) & $+1.09$\,rad \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+The batches are not continuous even at 2--4\,s, so the samples are lost
+from the start of the capture rather than after the buffer fills. Our
+code does not lose them: it reads $\min(\text{AVAIL}, 84)$ sets and writes
+all of them. Possible causes on the board:
+
+\begin{enumerate}
+  \item \textbf{A read discards the samples it does not return} (most
+        likely). When more than 84 sets are waiting, the board returns 84 and
+        discards the rest. This explains full batches, losses from the start
+        and no backlog. It also explains the vendor's clean test, where fewer
+        than 84 sets are ever waiting. OVERRUN would stay at 0.
+  \item \textbf{The buffer is much smaller than 1024 sets.} It would fill
+        within a fraction of a second, before any ringdown starts, so we
+        cannot test this from existing data. OVERRUN would climb.
+  \item \textbf{Samples are lost between the sensors and the board's
+        processor} while it is busy answering a read. OVERRUN would stay at 0,
+        and COUNTER would grow more slowly than 1493 per second. This is
+        least likely, because the vendor's test handled the same data rate
+        without loss.
+\end{enumerate}
+
+The guide is also out of date in at least one respect: it lists $\pm$2\,g
+as the only full-scale range, but these ringdowns were recorded at
+$\pm$16\,g. The buffer may likewise differ from what the guide describes.
+
+We also checked whether each batch lines up with the exact time of its
+read, which would show as the phase change following the $\pm$4\,ms jitter
+in read times. The test was inconclusive: a phase estimated from 84 samples
+(3.5 cycles) is too noisy. Either way, a batch sits at a roughly fixed
+offset from its read time, so the corrected method's assumption holds.
+
+\section{Recommendations}
+
+\begin{enumerate}
+  \item \textbf{Log AVAIL, OVERRUN and COUNTER on every read.} Our loop
+        already reads AVAIL and discards it. One 10\,s capture tells the
+        three causes apart: (1)~AVAIL $\approx$100 every read and OVERRUN
+        $=0$; (2)~AVAIL levels off at the buffer size and OVERRUN climbs;
+        (3)~COUNTER grows more slowly than $\approx$1493 per second. The
+        logs also record exactly where each future capture's gaps are.
+  \item \textbf{Read before 84 sets are waiting.} If cause~1 is right, this
+        stops the losses without making the loop faster: for example, read
+        smaller batches more often, so that AVAIL stays below 84, as in the
+        vendor's test.
+  \item \textbf{Use the measured rate, not 1600\,Hz,} in
+        \code{plot\_ringdown\_psd.py}, \code{extract\_run\_summary.py} and the
+        previous report's \code{make\_figures.py}. For future captures,
+        estimate it per capture from COUNTER and the elapsed time. The
+        sensors' rates are not crystal-controlled and may differ slightly
+        from board to board.
+  \item \textbf{Ask InUnit} how a read behaves when more than 84 sets are
+        waiting, and what the actual buffer size is in the current firmware.
+\end{enumerate}
+
+\paragraph{Reproducing.} Run from the repository root:
+\code{odr\_sweep.py} (Tables~\ref{tab:copies} and~\ref{tab:peaks}) and
+\code{batch\_continuity.py} (the phase table), both in
+\code{reports/pcb\_manual\_notes}.
+
+\end{document}

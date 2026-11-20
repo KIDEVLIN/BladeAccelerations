@@ -85,6 +85,8 @@ Options
     --track                map mode: mark the dominant-peak frequency at angles whose variance is >= 3x the median
     --vmin / --vmax        map colour limits (default 1st and 99.9th percentile of the PSD)
     --chord M              average chord for St (default 0.0138)
+    --short-labels         runs mode: short title and axis labels ('Flapwise PSD', 'f (Hz)', 'Peak St', 'Re'), for slides
+    --no-title, --no-legend   runs mode: leave out the title / the legend
     --no-modes             spectra and runs modes: leave out the ring-down natural frequencies (NATURAL_HZ), which are
                            otherwise drawn as dashed lines on the PSD and across the peak-frequency panel (Hz only).
                            The plotted direction's modes are dark, the other direction's light.
@@ -126,6 +128,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from plot_angle_sweep import (INK, MUTED, SURFACE, CAT, resolve, short_name, slug, parse_sensors,  # noqa: E402
                               style_axes, conditions_line, save, clip_matrix, add_style_args, apply_style, frame, fs)
 
+import plot_angle_sweep as pas                                       # noqa: E402  (style flags set at run time)
 from plot_design_space import FLAG_TRUE, as_flag, pick_regions, region_window    # noqa: E402
 
 AXES = ("x", "y", "z")
@@ -431,7 +434,8 @@ def fig_spectra(run, D, info, args, out):
     ax.set_xlabel(xlabel(args), color=INK)
     ax.set_ylabel(direction_prefix(args) + sym_psd(args), color=INK)
     style_axes(ax)
-    ax.grid(True, which="minor", color="#efeeea", linewidth=0.5, zorder=0)
+    if pas.GRID_ON:
+        ax.grid(True, which="minor", color="#efeeea", linewidth=0.5, zorder=0)
     mode_handles = draw_modes(ax, args)
     ax.legend(handles=ax.get_legend_handles_labels()[0] + mode_handles, loc="upper right", frameon=False,
               fontsize=fs(9), labelcolor=INK)
@@ -449,6 +453,7 @@ def fig_spectra(run, D, info, args, out):
 COLORBY = {"re": ("reynolds_number", "Reynolds number  Re", True),
            "ca": ("cauchy_edgewise", r"$Ca_e$", True),
            "u": ("velocity_m_s", "Freestream velocity U (m/s)", False)}
+SHORT_LABEL = {"re": r"$Re$", "ca": r"$Ca_e$", "u": r"$U$ (m/s)"}     # --short-labels
 
 
 def load_region_flags(summ, args, targets):
@@ -460,6 +465,9 @@ def load_region_flags(summ, args, targets):
                          f"--sensor S{args.sensor_id}  (or pass --metrics)")
     m = pd.read_csv(mpath)
     name = pick_regions(m, [args.region], mpath)[0]
+    # R1, R2, ... in order of window centre, matching the region numbering on the slides
+    regs = sorted({c[len("flag_"):] for c in m.columns if c.startswith("flag_r")}, key=lambda n: float(n[1:]))
+    label = f"R{regs.index(name) + 1}"
     m[f"flag_{name}"] = as_flag(m[f"flag_{name}"])
     f = m.set_index("run_name")[f"flag_{name}"]
     flags = {r: (None if r not in f.index or pd.isna(f[r]) else bool(f[r])) for r in targets}
@@ -471,7 +479,7 @@ def load_region_flags(summ, args, targets):
         if unrel:
             print("WARNING: own-median baseline unreliable (partial sweep), so these flags are not trustworthy "
                   "until angle_metrics.py gets --baseline-file:\n  " + "\n  ".join(unrel))
-    return name, flags, region_window(m, name)
+    return name, flags, region_window(m, name), label
 
 
 def run_style(args, fl, v, cmap, norm):
@@ -550,10 +558,13 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
         raise SystemExit("no runs left to plot")
     ax.set_xscale("log")
     set_yaxis(ax, args)
-    ax.set_xlabel(xlabel(args), color=INK)
-    ax.set_ylabel(direction_prefix(args) + sym_psd(args), color=INK)
+    short = args.short_labels
+    ax.set_xlabel((r"$St$" if args.xaxis == "st" else r"$f$ (Hz)") if short else xlabel(args), color=INK)
+    ax.set_ylabel(direction_prefix(args).strip() + " PSD" if short else direction_prefix(args) + sym_psd(args),
+                  color=INK)
     style_axes(ax)
-    ax.grid(True, which="minor", color="#efeeea", linewidth=0.5, zorder=0)
+    if pas.GRID_ON:
+        ax.grid(True, which="minor", color="#efeeea", linewidth=0.5, zorder=0)
     mode_handles = draw_modes(ax, args)
     lo, hi = round(min(angs), 1), round(max(angs), 1)     # encoder angles carry ~1e-3 deg noise (134.999)
     span = f"{lo:g}°" if np.isclose(lo, hi, atol=0.05) else f"{lo:g}° to {hi:g}°"
@@ -567,8 +578,13 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
     if flags:
         nt = sum(f is True for f, _ in used)
         note = f"   ·   region {args.region_name}: {nt} of {len(used)} runs with a peak"
-    ax.set_title(f"S{args.sensor_id} {band_label(args)}   ·   PSD {where}\n{len(used)} runs" + note,
-                 loc="left", fontsize=fs(11), color=INK)
+    if short:
+        title = f"S{args.sensor_id} {DIRECTION.get(args.component, band_label(args))}" + \
+            (f", {args.region_label}" if flags else "")
+    else:
+        title = f"S{args.sensor_id} {band_label(args)}   ·   PSD {where}\n{len(used)} runs" + note
+    if not args.no_title:
+        ax.set_title(title, loc="left", fontsize=fs(11), color=INK)
     handles = []
     if by_flag:
         n_t = sum(f is True for f, _ in used)
@@ -579,16 +595,20 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
             handles.append(Line2D([], [], color=MUTED, lw=1.6, ls=(0, (4, 3)),
                                   label=f"region not measured ({sum(f is None for f, _ in used)})"))
     elif any(g for _, g in used):
-        handles = [Line2D([], [], color=GREY_LINE, lw=2.2, label=f"no peak in region ({sum(g for _, g in used)})")]
+        handles = [Line2D([], [], color=GREY_LINE, lw=2.2,
+                          label="no peak" if short else f"no peak in region ({sum(g for _, g in used)})")]
     handles += mode_handles
-    if handles:
+    if handles and not args.no_legend:
         ax.legend(handles=handles, loc="best", frameon=False, fontsize=fs(9), labelcolor=INK)
     if show_pk:
         if xlog:
             axp.set_xscale("log")
-        axp.set_xlabel(xlab, color=INK)
-        axp.set_ylabel(direction_prefix(args) + ("peak St" if args.xaxis == "st" else "peak frequency (Hz)"),
-                       color=INK)
+        axp.set_xlabel(SHORT_LABEL[xname] if short else xlab, color=INK)
+        if short:
+            axp.set_ylabel(r"Peak $St$" if args.xaxis == "st" else r"Peak $f$ (Hz)", color=INK)
+        else:
+            axp.set_ylabel(direction_prefix(args) + ("peak St" if args.xaxis == "st" else "peak frequency (Hz)"),
+                           color=INK)
         rng = active_range(args)
         if rng:
             axp.set_ylim(*rng)
@@ -597,8 +617,8 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
     if cax is not None:
         sm = ScalarMappable(norm=norm, cmap=cmap)
         cb = fig.colorbar(sm, cax=cax)
-        cb.set_label(clabel, color=INK)
-        cb.ax.tick_params(colors=MUTED)
+        cb.set_label(SHORT_LABEL["re" if by_flag else args.colorby] if short else clabel, color=INK)
+        cb.ax.tick_params(colors=MUTED, labelcolor=INK)
         cb.outline.set_edgecolor(MUTED)
     save(fig, out, args.dpi)
     pd.DataFrame(rows).to_csv(out.with_suffix(".csv"), index=False)
@@ -644,6 +664,10 @@ def main():
     ap.add_argument("--vmax", type=float)
     ap.add_argument("--chord", type=float, default=0.0138)
     ap.add_argument("--no-modes", action="store_true")
+    ap.add_argument("--no-title", action="store_true", help="runs mode: leave out the title")
+    ap.add_argument("--no-legend", action="store_true", help="runs mode: leave out the legend")
+    ap.add_argument("--short-labels", action="store_true",
+                    help="runs mode: short axis labels and title (e.g. 'Flapwise PSD', 'f (Hz)', 'Re') for slides")
     ap.add_argument("--out")
     add_style_args(ap)
     ap.add_argument("--dpi", type=int, default=200)
@@ -723,7 +747,7 @@ def run_job(args, summ, out, targets, batch, infos, cache, flag_cache):
     if args.region:
         if args.region not in flag_cache:
             flag_cache[args.region] = load_region_flags(summ, args, targets)
-        args.region_name, flags, window = flag_cache[args.region]
+        args.region_name, flags, window, args.region_label = flag_cache[args.region]
         if args.flag_false == "hide":
             dropped = [r for r in targets if flags[r] is False]
             targets = [r for r in targets if flags[r] is not False]
