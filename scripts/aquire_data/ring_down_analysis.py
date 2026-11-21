@@ -160,7 +160,9 @@ def read_header_odr(path):
 def load_trial(path, fs_override, meta):
     """Per-sample times come from run_loader (batch-stamped times spread evenly across each batch); the
     data are then interpolated onto a uniform grid at the ODR so filters, spectra and fits can assume a
-    constant sample rate. Returns (t, D (N, 4 sensors, 3 axes) in g, info dict)."""
+    constant sample rate. Returns (t, D (N, 4 sensors, 3 axes) in g, info dict).
+    
+    FIX FIX FIX get rid of interpolation"""
     df, _ = load_accel_csv(path)
     mg = df.attrs.get("mg_per_lsb")
     if mg is None:
@@ -174,13 +176,14 @@ def load_trial(path, fs_override, meta):
     odr = read_header_odr(path) or meta.get("accel_odr_hz")
     measured = (len(t) - 1) / (t[-1] - t[0])
     fs = float(fs_override or odr or measured)
-
     dt = np.diff(t)
     nominal = 1.0 / fs
     slow = dt > 3.0 * nominal
     info = dict(fs=fs, odr=odr, measured=measured, n=len(t), mg=mg,
                 frac_slow=float(slow.mean()), max_dt_ms=float(dt.max() * 1000.0),
                 missing_frac=float(max(0.0, 1.0 - len(t) / (fs * (t[-1] - t[0])))))
+    
+    
     tu = np.arange(t[0], t[-1], nominal)
     acc = np.column_stack([np.interp(tu, t, raw[:, k]) for k in range(raw.shape[1])])
     D = (acc * mg / 1000.0).reshape(-1, NS, 3)
@@ -569,7 +572,8 @@ def main():
     post = t >= onset #boolean mask the same dimension as t, True for samples after the flick onset
     # spectra of the ring-down, and the pre-flick noise floor
     flick_length = args.flick_t if args.flick_t is not None else 0.5
-    f, P = psd(D[post][:int(flick_length * fs)], fs, args.nperseg) #saves the frequency and the power spectral density of the post-flick data
+    #f,P = psd(D[post][:int(flick_length * fs)], fs, args.nperseg) #saves the frequency and the power spectral density of the post-flick data
+    f, P = psd(D[post][:int(flick_length * fs)], fs, np.sum([D[post][:int(flick_length * fs)]])) #saves the frequency and the power spectral density of the post-flick data
     Pn, fn_f = None, None
     if pre.sum() >= 256:
         # shorter segments than the ring-down PSD: the quiet record is short, and more averages give a

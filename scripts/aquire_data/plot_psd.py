@@ -38,7 +38,7 @@ First argument: the Production_summaries folder (or the master_angles.csv inside
 Options
     --sensor S4            accelerometer (default S4)
     --component {mag,x,y,z} [...]   |a| (default) or one sensor axis (axes need extract_run_summary.py 1.2+)
-    --xaxis {freq,st} [...]  frequency in Hz (default) or Strouhal number St = f * c_avg / U, with c_avg =
+    --xaxis {freq,st, fn} [...]  frequency in Hz (default) or Strouhal number St = f * c_avg / U, with c_avg =
                            --chord (default 0.0138 m) and U the measured freestream velocity of that run.
                            With st the PSD is converted to a density per unit St (S(St) = S(f) * U / c_avg),
                            so areas under curves still equal variances.
@@ -171,10 +171,14 @@ def transform(D, info, args, smooth=1):
     P = uniform_filter1d(D["P"], smooth, axis=-1, mode="nearest") if smooth > 1 else D["P"].copy()
     if args.xaxis == "st":
         x, S = D["f"] * args.chord / U, P * U / args.chord
+    elif args.xaxis == "fn":
+        x, S = D["f"] / args.fn, P*args.fn
     else:
         x, S = D["f"], P
     if args.norm == "ac":
         S = S / ac ** 2
+    
+    
     return x, S
 
 
@@ -209,23 +213,35 @@ def comp_tag(args):
 # edit this to get normalization by fn
 def sym_psd(args):
     sub = "|a|" if args.component == "mag" else f"a_{args.component}"
-    var = "St" if args.xaxis == "st" else "f"
+    var = {"st": "St", "fn": r"f/f_n"}.get(args.xaxis, "f")
     num = rf"S_{{{sub}}}({var})"
     if args.premult:
         num = rf"{var}\," + num
-        per = "ln St" if args.xaxis == "st" else "ln f"
+        per = {"st": "ln St", "fn": "ln(f/f_n)"}.get(args.xaxis, "ln f")
         if args.norm == "ac":
             return rf"${num}\,/\,a_c^2$   (variance per {per})"
         return rf"${num}$   (g$^2$ per {per})"
     if args.norm == "ac":
-        unit = "per unit St" if args.xaxis == "st" else "1/Hz"
+        unit = {"st": "per unit St", "fn": "per unit f/f_n"}.get(args.xaxis, "1/Hz")
         return rf"${num}\,/\,a_c^2$   ({unit})"
-    unit = "g$^2$ per unit St" if args.xaxis == "st" else "g$^2$/Hz"
+    unit = {"st": "g$^2$ per unit St", "fn": "g$^2$ per unit f/f_n"}.get(args.xaxis, "g$^2$/Hz")
     return rf"${num}$   ({unit})"
 
 
 def xlabel(args):
-    return r"Strouhal number  $St = f\,\bar{c}/U$" if args.xaxis == "st" else "Frequency (Hz)"
+    if args.xaxis == "st":
+        return r"Strouhal number  $St = f\,\bar{c}/U$"
+    if args.xaxis == "fn":
+        return rf"Normalized frequency  $f/f_n$   ($f_n$ = {args.fn:g} Hz)"
+    return "Frequency (Hz)"
+
+
+def fmt_x(v, args):
+    if args.xaxis == "st":
+        return f"St {v:.3g}"
+    if args.xaxis == "fn":
+        return f"f/fn {v:.3g}"
+    return f"{v:.3g} Hz"
 
 
 def band_label(args):
@@ -529,7 +545,7 @@ def fig_runs(runs, data, infos, args, out, flags=None, window=None):
         if xlog:
             axp.set_xscale("log")
         axp.set_xlabel(xlab, color=INK)
-        axp.set_ylabel("Peak St" if args.xaxis == "st" else "Peak frequency (Hz)", color=INK)
+        axp.set_ylabel({"st": "Peak St", "fn": r"Peak $f/f_n$"}.get(args.xaxis, "Peak frequency (Hz)"), color=INK)
         rng = active_range(args)
         if rng:
             axp.set_ylim(*rng)
@@ -555,7 +571,8 @@ def main():
     ap.add_argument("--run", nargs="+", required=True)
     ap.add_argument("--sensor", default="S4")
     ap.add_argument("--component", nargs="+", choices=["mag", "x", "y", "z"], default=["mag"])
-    ap.add_argument("--xaxis", nargs="+", choices=["freq", "st"], default=["freq"])
+    ap.add_argument("--xaxis", nargs="+", choices=["freq", "st","fn"], default=["freq"])
+    ap.add_argument("--fn", type=float, help = "natural frequency of the system (for fn normalization)")
     ap.add_argument("--norm", choices=["ac", "raw"], default="ac")
     ap.add_argument("--premult", action="store_true")
     ap.add_argument("--yscale", choices=["log", "linear"])
@@ -589,6 +606,11 @@ def main():
     ap.add_argument("--dpi", type=int, default=200)
     args = ap.parse_args()
     apply_style(args)
+    print(repr(args.xaxis), repr(args.fn))
+    # if args.xaxis == "fn" and not (args.fn and args.fn > 0):
+    #     raise SystemExit("--xaxis fn needs --fn <natural frequency in Hz>")
+    # if args.fn is not None and args.xaxis != "fn":
+    #     raise SystemExit("--fn only applies with --xaxis fn")
 
     args.ylin = (args.yscale or ("linear" if args.premult else "log")) == "linear"
     fixed = [n for n, v in (("--ylim", args.ylim), ("--ylim-freq", args.ylim_freq), ("--ylim-st", args.ylim_st),
@@ -649,7 +671,7 @@ def main():
 
 def run_job(args, summ, out, targets, batch, infos, cache, flag_cache):
     """One combination of region / component / xaxis. Returns the number of figures written."""
-    tag = comp_tag(args) + ("_st" if args.xaxis == "st" else "") + ("_raw" if args.norm == "raw" else "")
+    tag = comp_tag(args) + ("_st" if args.xaxis == "st" else f"_fn{args.fn:g}" if args.xaxis == "fn" else "") + ("_raw" if args.norm == "raw" else "")
     tag += "_premult" if args.premult else ""
     if args.ylin != args.premult:
         tag += "_lin" if args.ylin else "_logy"
